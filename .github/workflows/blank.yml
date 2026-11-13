@@ -1,0 +1,30 @@
+
+name: Build BeeKingdom
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Build plugin
+        run: mvn -B clean package
+
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeeKingdom-JAR
+          path: target/*.jar
