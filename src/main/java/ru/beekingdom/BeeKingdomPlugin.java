@@ -15,6 +15,7 @@ import org.bukkit.entity.Entity;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
+import org.bukkit.attribute.Attribute;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
@@ -68,6 +69,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         int chunkX;
         int chunkZ;
         boolean hasLocation;
+        boolean fattened;
         BeeProfile(UUID owner) { this.owner = owner; }
     }
 
@@ -91,7 +93,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private final Map<UUID, Vector> freeFlightDirections = new HashMap<>();
     private final Map<UUID, Integer> freeFlightRefresh = new HashMap<>();
 
-    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey;
+    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey;
 
     @Override public void onEnable() {
         ownerKey = new NamespacedKey(this, "owner");
@@ -100,6 +102,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         armorKey = new NamespacedKey(this, "armor");
         collarKey = new NamespacedKey(this, "bee_collar");
         displayKey = new NamespacedKey(this, "armor_display");
+        fattenedKey = new NamespacedKey(this, "fattened");
         saveDefaultConfig();
         loadProfiles();
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -155,6 +158,30 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         bee.setCustomNameVisible(true);
         saveProfiles();
         player.sendMessage(ChatColor.GREEN + "Пчела приручена! Она теперь принадлежит тебе.");
+    }
+
+    @EventHandler public void onFeedBee(PlayerInteractEntityEvent event) {
+        if (!(event.getRightClicked() instanceof Bee bee) || event.getHand() != EquipmentSlot.HAND) return;
+        BeeProfile profile = profiles.get(bee.getUniqueId());
+        if (profile == null || !profile.owner.equals(event.getPlayer().getUniqueId()) || profile.fattened) return;
+        ItemStack hand = event.getPlayer().getInventory().getItemInMainHand();
+        if (hand.getType() != Material.SUGAR) return;
+        event.setCancelled(true);
+        if (hand.getAmount() < 64) {
+            event.getPlayer().sendMessage(ChatColor.RED + "Для откорма нужен полный стак сахара — 64 штуки.");
+            return;
+        }
+        if (event.getPlayer().getGameMode() != org.bukkit.GameMode.CREATIVE) hand.setAmount(hand.getAmount() - 64);
+        profile.fattened = true;
+        applyBeeScale(bee, profile);
+        writeProfileToBee(bee, profile);
+        saveProfiles();
+        event.getPlayer().sendMessage(ChatColor.GREEN + "Пчела откормлена! Она стала крупнее.");
+    }
+
+    private void applyBeeScale(Bee bee, BeeProfile profile) {
+        var scale = bee.getAttribute(Attribute.SCALE);
+        if (scale != null) scale.setBaseValue(profile.fattened ? 1.65 : 1.0);
     }
 
     @EventHandler public void onCollarUse(PlayerInteractEvent event) {
@@ -383,6 +410,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         }
         rememberLocation(profile, bee); loadedBees.put(id, bee);
         if (!profile.armor.isBlank()) applyArmorDisplay(bee, profile);
+        applyBeeScale(bee, profile);
     }
 
     private void rememberLocation(BeeProfile profile, Bee bee) {
@@ -465,6 +493,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         pdc.set(modeKey, PersistentDataType.STRING, profile.mode.name());
         pdc.set(targetKey, PersistentDataType.STRING, profile.targetName);
         pdc.set(armorKey, PersistentDataType.STRING, profile.armor);
+        pdc.set(fattenedKey, PersistentDataType.STRING, Boolean.toString(profile.fattened));
     }
 
     private void removeArmorDisplay(Bee bee) {
@@ -566,6 +595,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             BeeProfile p = new BeeProfile(UUID.fromString(owner));
             try { p.mode = Mode.valueOf(getConfig().getString("bees." + key + ".mode", "FOLLOW")); } catch (IllegalArgumentException ignored) { p.mode = Mode.FOLLOW; }
             p.targetName = getConfig().getString("bees." + key + ".target", ""); p.armor = getConfig().getString("bees." + key + ".armor", "");
+            p.fattened = getConfig().getBoolean("bees." + key + ".fattened", false);
             p.world = getConfig().getString("bees." + key + ".world", ""); p.chunkX = getConfig().getInt("bees." + key + ".chunk-x");
             p.chunkZ = getConfig().getInt("bees." + key + ".chunk-z"); p.hasLocation = !p.world.isBlank() && getConfig().contains("bees." + key + ".chunk-x");
             profiles.put(id, p);
@@ -578,6 +608,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             String path = "bees." + entry.getKey(); BeeProfile p = entry.getValue();
             getConfig().set(path + ".owner", p.owner.toString()); getConfig().set(path + ".mode", p.mode.name());
             getConfig().set(path + ".target", p.targetName); getConfig().set(path + ".armor", p.armor);
+            getConfig().set(path + ".fattened", p.fattened);
             if (p.hasLocation) { getConfig().set(path + ".world", p.world); getConfig().set(path + ".chunk-x", p.chunkX); getConfig().set(path + ".chunk-z", p.chunkZ); }
         }
         saveConfig();
