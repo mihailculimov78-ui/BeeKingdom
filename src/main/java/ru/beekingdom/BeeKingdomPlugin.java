@@ -292,7 +292,9 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         LivingEntity target = event.getTarget(); if (target == null) return;
         if (target instanceof Player player && player.getUniqueId().equals(profile.owner)) { event.setCancelled(true); return; }
         switch (profile.mode) {
-            case FOLLOW, STAY, PEACEFUL -> event.setCancelled(true);
+            case FOLLOW, PEACEFUL -> event.setCancelled(true);
+            // В свободном полёте пчела использует обычный AI и может защищаться.
+            case STAY -> { }
             case TARGET -> { if (!(target instanceof Player player) || !player.getName().equalsIgnoreCase(profile.targetName)) event.setCancelled(true); }
             case BERSERK -> { if (target instanceof Bee other && isOwnedBy(other, profile.owner)) event.setCancelled(true); }
         }
@@ -301,7 +303,16 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     @EventHandler public void onBeeDamage(EntityDamageByEntityEvent event) {
         if (event.getEntity() instanceof Bee victim && event.getDamager() instanceof Player attacker) {
             BeeProfile victimProfile = profiles.get(victim.getUniqueId());
-            if (victimProfile != null && !attacker.getUniqueId().equals(victimProfile.owner)) { event.setCancelled(true); return; }
+            // Приручённую пчелу могут атаковать все игроки, кроме владельца.
+            if (victimProfile != null && attacker.getUniqueId().equals(victimProfile.owner)) {
+                event.setCancelled(true);
+                return;
+            }
+            // В свободном полёте пчела отвечает на нападение обычным поведением Minecraft.
+            if (victimProfile != null && victimProfile.mode == Mode.STAY) {
+                victim.setAware(true);
+                victim.setTarget(attacker);
+            }
         }
         if (event.getDamager() instanceof Bee bee) {
             BeeProfile profile = profiles.get(bee.getUniqueId());
@@ -401,20 +412,10 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
                     faceVelocity(bee);
                 } else bee.setVelocity(bee.getVelocity().multiply(0.45));
             } else if (profile.mode == Mode.STAY) {
-                // Свободный полёт: плавное блуждание с периодической сменой направления.
-                // В отличие от старой логики, скорость не обнуляется.
-                bee.setAware(false); bee.setTarget(null);
-                int refresh = freeFlightRefresh.getOrDefault(bee.getUniqueId(), 0) - 2;
-                if (refresh <= 0 || !freeFlightDirections.containsKey(bee.getUniqueId())) {
-                    ThreadLocalRandom random = ThreadLocalRandom.current();
-                    Vector drift = new Vector(random.nextDouble(-1.0, 1.0), random.nextDouble(-0.35, 0.45), random.nextDouble(-1.0, 1.0));
-                    if (drift.lengthSquared() < 0.05) drift.setX(0.5);
-                    freeFlightDirections.put(bee.getUniqueId(), drift.normalize().multiply(0.065));
-                    freeFlightRefresh.put(bee.getUniqueId(), random.nextInt(12, 26));
-                } else freeFlightRefresh.put(bee.getUniqueId(), refresh);
-                Vector drift = freeFlightDirections.get(bee.getUniqueId());
-                bee.setVelocity(bee.getVelocity().multiply(0.78).add(drift));
-                faceVelocity(bee);
+                // Свободный полёт использует штатный AI пчелы Minecraft:
+                // естественное блуждание, повороты и реакцию на окружающий мир.
+                // Не сбрасываем цель — пчела должна суметь ответить на нападение.
+                bee.setAware(true);
             } else if (profile.mode == Mode.PEACEFUL) {
                 bee.setAware(true); bee.setTarget(null);
             } else if (profile.mode == Mode.TARGET) {
