@@ -5,6 +5,7 @@ import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
+import org.bukkit.Particle;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.command.Command;
@@ -100,8 +101,12 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private final Map<UUID, Vector> freeFlightDirections = new HashMap<>();
     private final Map<UUID, Integer> freeFlightRefresh = new HashMap<>();
     private final Map<UUID, LivingEntity> ridingAttackTargets = new HashMap<>();
+    private final Set<UUID> waitingForAdminCode = new HashSet<>();
+    private final Set<UUID> adminPanelUsers = new HashSet<>();
+    private final Set<UUID> adminBees = new HashSet<>();
+    private boolean discoParty = false;
 
-    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey, saddledKey, potionEffectKey, sugarFedKey;
+    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey, saddledKey, potionEffectKey, sugarFedKey, adminBeeKey;
 
     @Override public void onEnable() {
         ownerKey = new NamespacedKey(this, "owner");
@@ -114,6 +119,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         saddledKey = new NamespacedKey(this, "saddled");
         potionEffectKey = new NamespacedKey(this, "potion_effect");
         sugarFedKey = new NamespacedKey(this, "sugar_fed");
+        adminBeeKey = new NamespacedKey(this, "admin_boss_bee");
         saveDefaultConfig();
         loadProfiles();
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -256,6 +262,13 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             return;
         }
         event.setCancelled(true);
+        if (event.getView().getTitle().contains("Админ-панель")) {
+            if (!adminPanelUsers.contains(player.getUniqueId())) { player.closeInventory(); player.sendMessage(ChatColor.RED + "Сначала введи код доступа."); return; }
+            if (raw == 11) { spawnAdminBee(player); openAdminMenu(player); return; }
+            if (raw == 15) { discoParty = !discoParty; player.sendMessage(discoParty ? ChatColor.LIGHT_PURPLE + "Диско-пати включена!" : ChatColor.GRAY + "Диско-пати выключена."); openAdminMenu(player); return; }
+            if (raw == 22) { openMainMenu(player, 0); return; }
+            return;
+        }
         if (event.getView().getTitle().contains("Управление отрядом")) {
             if (raw == 22) { openMainMenu(player, 0); return; }
             if (raw == 11 || raw == 15) { applyArmyItem(player, event, raw); return; }
@@ -271,6 +284,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (!holder.detail) {
             if (raw < holder.entries.size()) { openBeeMenu(player, holder.entries.get(raw)); return; }
             if (raw == 44) { openArmyEquipmentMenu(player); return; }
+            if (raw == 43) { waitingForAdminCode.add(player.getUniqueId()); player.closeInventory(); player.sendMessage(ChatColor.GOLD + "Введи код доступа к админ-панели в чат (или «отмена»)."); return; }
             if (raw == 50) { openFattenedMenu(player, 0); return; }
             if (raw >= 45 && raw <= 49) {
                 Mode[] modes = {Mode.FOLLOW, Mode.STAY, Mode.TARGET, Mode.PEACEFUL, Mode.BERSERK};
@@ -369,13 +383,21 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
 
     @EventHandler public void onChatTarget(AsyncChatEvent event) {
         UUID playerId = event.getPlayer().getUniqueId();
+        boolean adminCode = waitingForAdminCode.contains(playerId);
         boolean single = waitingForTarget.remove(playerId);
         boolean army = waitingForArmyTarget.remove(playerId);
-        if (!single && !army) return;
+        if (!single && !army && !adminCode) return;
         event.setCancelled(true);
         String input = PlainTextComponentSerializer.plainText().serialize(event.message()).trim();
         Bukkit.getScheduler().runTask(this, () -> {
             Player player = Bukkit.getPlayer(playerId); if (player == null) return;
+            if (adminCode) {
+                waitingForAdminCode.remove(playerId);
+                if (input.equals("67148867")) { adminPanelUsers.add(playerId); player.sendMessage(ChatColor.GREEN + "Код принят. Добро пожаловать в админ-панель."); openAdminMenu(player); }
+                else if (input.equalsIgnoreCase("отмена") || input.equalsIgnoreCase("cancel")) player.sendMessage(ChatColor.GRAY + "Вход отменён.");
+                else player.sendMessage(ChatColor.RED + "Неверный код. Открой кнопку «Админ-панель» и попробуй снова.");
+                return;
+            }
             if (input.equalsIgnoreCase("отмена") || input.equalsIgnoreCase("cancel")) {
                 pendingBeeTarget.remove(playerId); player.sendMessage(ChatColor.GRAY + "Выбор цели отменён."); return;
             }
@@ -392,6 +414,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
 
     @EventHandler public void onBeeTarget(EntityTargetLivingEntityEvent event) {
         if (!(event.getEntity() instanceof Bee bee)) return;
+        if (adminBees.contains(bee.getUniqueId()) && event.getTarget() instanceof Player) return;
         BeeProfile profile = profiles.get(bee.getUniqueId()); if (profile == null) return;
         LivingEntity target = event.getTarget(); if (target == null) return;
         if (target instanceof Player player && player.getUniqueId().equals(profile.owner)) { event.setCancelled(true); return; }
@@ -465,6 +488,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     }
 
     private void registerLoadedBee(Bee bee) {
+        if (bee.getPersistentDataContainer().has(adminBeeKey, PersistentDataType.STRING)) adminBees.add(bee.getUniqueId());
         UUID id = bee.getUniqueId();
         if (releasedBees.remove(id)) {
             removeArmorDisplay(bee);
@@ -497,6 +521,12 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         applyBeeHealth(bee);
     }
 
+    @EventHandler public void onAdminBeeDamage(EntityDamageByEntityEvent event) {
+        if (event.getDamager() instanceof Bee bee && adminBees.contains(bee.getUniqueId()) && event.getEntity() instanceof Player) {
+            event.setDamage(1000.0);
+        }
+    }
+
     private void applyBeeHealth(Bee bee) {
         var health = bee.getAttribute(Attribute.MAX_HEALTH);
         if (health == null) return;
@@ -511,6 +541,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     }
 
     private void tickBees() {
+        tickAdminBees();
+        if (discoParty) tickDiscoParty();
         for (Map.Entry<UUID, BeeProfile> entry : profiles.entrySet()) {
             Bee bee = loadedBees.get(entry.getKey()); if (bee == null || !bee.isValid() || bee.isDead()) continue;
             BeeProfile profile = entry.getValue();
@@ -663,6 +695,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         inv.setItem(48, armyModeItem(player.getUniqueId(), Material.WHITE_WOOL, "§bМирный режим", Mode.PEACEFUL));
         inv.setItem(49, armyModeItem(player.getUniqueId(), Material.BLAZE_POWDER, "§6Защита территории", Mode.BERSERK));
         if (page > 0) inv.setItem(51, namedItem(Material.ARROW, "§f← Назад", List.of("§7Предыдущая страница")));
+        inv.setItem(43, namedItem(Material.COMMAND_BLOCK, "§cАдмин-панель", List.of("§7Доступ по коду", "§eНажми, чтобы войти")));
         inv.setItem(44, namedItem(Material.CHEST, "§bУправление отрядом", List.of("§7Общая броня и эффекты", "§eНажми, чтобы открыть")));
         inv.setItem(50, namedItem(Material.HONEY_BLOCK, "§6Откормленные пчёлы", List.of("§7Отдельная категория", "§7Количество: " + profiles.values().stream().filter(p -> p.owner.equals(player.getUniqueId()) && p.fattened).count(), "§eНажми, чтобы открыть")));
         inv.setItem(52, namedItem(Material.MAP, "§eСтраница " + (page + 1) + "/" + (maxPage + 1), List.of("§7Обычных пчёл: " + owned.size(), "§7Нажми на пчелу для настроек")));
@@ -691,6 +724,69 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         inv.setItem(52, namedItem(Material.MAP, "§eСтраница " + (page + 1) + "/" + (maxPage + 1), List.of("§7Всего: " + owned.size())));
         if (page < maxPage) inv.setItem(53, namedItem(Material.ARROW, "§fВперёд →", List.of()));
         player.openInventory(inv);
+    }
+
+    private void openAdminMenu(Player player) {
+        MenuHolder holder = new MenuHolder(false, 0, null);
+        Inventory inv = Bukkit.createInventory(holder, 27, "§6✦ BeeKingdom §8| §cАдмин-панель"); holder.inventory = inv;
+        ItemStack filler = namedItem(Material.GRAY_STAINED_GLASS_PANE, "§8 ", List.of());
+        for (int i = 0; i < 27; i++) inv.setItem(i, filler);
+        inv.setItem(11, namedItem(Material.BEE_NEST, "§cШохiдко", List.of("§7Призвать огромную быструю пчелу", "§7Здоровье как у Вардена", "§7Очень сильная атака", "§eНажми, чтобы призвать")));
+        inv.setItem(15, namedItem(discoParty ? Material.JUKEBOX : Material.NOTE_BLOCK, discoParty ? "§dВыключить диско-пати" : "§dДиско-пати", List.of("§7Обычные пчёлы зависают и кружатся", "§7Вокруг появляются разноцветные частицы", "§7Сейчас: " + (discoParty ? "§aВключено" : "§cВыключено"), "§eНажми для переключения")));
+        inv.setItem(22, namedItem(Material.ARROW, "§f← Назад", List.of()));
+        player.openInventory(inv);
+    }
+
+    private void spawnAdminBee(Player player) {
+        org.bukkit.Location spawn = player.getLocation().add(player.getLocation().getDirection().multiply(2.5)).add(0, 1, 0);
+        Bee bee = player.getWorld().spawn(spawn, Bee.class);
+        bee.setCustomName(ChatColor.LIGHT_PURPLE + "Шохiдко — Королевская пчела");
+        bee.setCustomNameVisible(true);
+        bee.setPersistent(true);
+        bee.setRemoveWhenFarAway(false);
+        bee.getPersistentDataContainer().set(adminBeeKey, PersistentDataType.STRING, "true");
+        adminBees.add(bee.getUniqueId());
+        var maxHealth = bee.getAttribute(Attribute.MAX_HEALTH);
+        if (maxHealth != null) { maxHealth.setBaseValue(500.0); bee.setHealth(500.0); }
+        var speed = bee.getAttribute(Attribute.MOVEMENT_SPEED);
+        if (speed != null) speed.setBaseValue(1.0);
+        var damage = bee.getAttribute(Attribute.ATTACK_DAMAGE);
+        if (damage != null) damage.setBaseValue(40.0);
+        var scale = bee.getAttribute(Attribute.SCALE);
+        if (scale != null) scale.setBaseValue(3.0);
+        bee.setAware(true);
+        player.sendMessage(ChatColor.LIGHT_PURPLE + "Шохiдко призвана! 500 HP, увеличенный размер и усиленная атака.");
+    }
+
+    private void tickAdminBees() {
+        for (UUID id : new HashSet<>(adminBees)) {
+            Entity entity = Bukkit.getEntity(id);
+            if (!(entity instanceof Bee bee) || !bee.isValid() || bee.isDead()) { adminBees.remove(id); continue; }
+            if (bee.hasStung()) bee.setHasStung(false);
+            Player target = bee.getWorld().getPlayers().stream().filter(p -> p.getGameMode() != org.bukkit.GameMode.SPECTATOR)
+                    .min(Comparator.comparingDouble(p -> p.getLocation().distanceSquared(bee.getLocation()))).orElse(null);
+            if (target != null && target.getLocation().distanceSquared(bee.getLocation()) < 1600) bee.setTarget(target);
+            else bee.setTarget(null);
+        }
+    }
+
+    private void tickDiscoParty() {
+        for (World world : Bukkit.getWorlds()) for (Entity entity : world.getEntities()) {
+            if (!(entity instanceof Bee bee) || adminBees.contains(bee.getUniqueId())) continue;
+            bee.setAI(false);
+            bee.setGravity(false);
+            bee.setVelocity(new Vector(0, 0, 0));
+            org.bukkit.Location base = bee.getLocation();
+            double time = (System.currentTimeMillis() % 4000L) / 4000.0 * Math.PI * 2.0;
+            for (int i = 0; i < 8; i++) {
+                double angle = time + i * Math.PI / 4.0;
+                double x = Math.cos(angle) * 0.9;
+                double z = Math.sin(angle) * 0.9;
+                org.bukkit.Location point = base.clone().add(x, 0.35 + (i % 3) * 0.25, z);
+                world.spawnParticle(Particle.NOTE, point, 0, ThreadLocalRandom.current().nextDouble(), 0, 0, 1);
+                world.spawnParticle(Particle.END_ROD, point, 1, 0.03, 0.03, 0.03, 0.01);
+            }
+        }
     }
 
     private void openArmyEquipmentMenu(Player player) {
