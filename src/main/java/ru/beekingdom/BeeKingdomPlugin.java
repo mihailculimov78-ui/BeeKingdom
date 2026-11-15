@@ -37,6 +37,9 @@ import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
+import org.bukkit.util.Transformation;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -85,6 +88,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private final Map<UUID, UUID> pendingBeeTarget = new HashMap<>();
     private final Set<UUID> waitingForTarget = new HashSet<>();
     private final Set<UUID> waitingForArmyTarget = new HashSet<>();
+    private final Map<UUID, Vector> freeFlightDirections = new HashMap<>();
+    private final Map<UUID, Integer> freeFlightRefresh = new HashMap<>();
 
     private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey;
 
@@ -251,6 +256,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             releasedBees.add(beeId);
         }
         profiles.remove(beeId); loadedBees.remove(beeId);
+        freeFlightDirections.remove(beeId); freeFlightRefresh.remove(beeId);
         pendingBeeTarget.values().removeIf(id -> id.equals(beeId));
         saveProfiles();
         player.sendMessage(ChatColor.GREEN + "Пчела отпущена. Она больше не связана с твоим ошейником.");
@@ -312,6 +318,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         BeeProfile profile = profiles.remove(bee.getUniqueId()); if (profile == null) return;
         if (!profile.armor.isBlank()) { Material armor = Material.matchMaterial(profile.armor); if (armor != null) event.getDrops().add(new ItemStack(armor)); }
         removeArmorDisplay(bee); loadedBees.remove(bee.getUniqueId());
+        freeFlightDirections.remove(bee.getUniqueId()); freeFlightRefresh.remove(bee.getUniqueId());
         pendingBeeTarget.values().removeIf(id -> id.equals(bee.getUniqueId())); saveProfiles();
     }
 
@@ -330,6 +337,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             BeeProfile profile = profiles.get(bee.getUniqueId());
             if (profile != null) rememberLocation(profile, bee);
             loadedBees.remove(bee.getUniqueId());
+            freeFlightDirections.remove(bee.getUniqueId()); freeFlightRefresh.remove(bee.getUniqueId());
         }
         saveProfiles();
     }
@@ -390,9 +398,23 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
                 else if (distance > 2.8) {
                     Vector direction = owner.getLocation().toVector().subtract(bee.getLocation().toVector()).normalize().multiply(0.22);
                     bee.setVelocity(bee.getVelocity().multiply(0.35).add(direction));
+                    faceVelocity(bee);
                 } else bee.setVelocity(bee.getVelocity().multiply(0.45));
             } else if (profile.mode == Mode.STAY) {
-                bee.setAware(false); bee.setTarget(null); bee.setVelocity(bee.getVelocity().multiply(0.35));
+                // Свободный полёт: плавное блуждание с периодической сменой направления.
+                // В отличие от старой логики, скорость не обнуляется.
+                bee.setAware(false); bee.setTarget(null);
+                int refresh = freeFlightRefresh.getOrDefault(bee.getUniqueId(), 0) - 2;
+                if (refresh <= 0 || !freeFlightDirections.containsKey(bee.getUniqueId())) {
+                    ThreadLocalRandom random = ThreadLocalRandom.current();
+                    Vector drift = new Vector(random.nextDouble(-1.0, 1.0), random.nextDouble(-0.35, 0.45), random.nextDouble(-1.0, 1.0));
+                    if (drift.lengthSquared() < 0.05) drift.setX(0.5);
+                    freeFlightDirections.put(bee.getUniqueId(), drift.normalize().multiply(0.065));
+                    freeFlightRefresh.put(bee.getUniqueId(), random.nextInt(12, 26));
+                } else freeFlightRefresh.put(bee.getUniqueId(), refresh);
+                Vector drift = freeFlightDirections.get(bee.getUniqueId());
+                bee.setVelocity(bee.getVelocity().multiply(0.78).add(drift));
+                faceVelocity(bee);
             } else if (profile.mode == Mode.PEACEFUL) {
                 bee.setAware(true); bee.setTarget(null);
             } else if (profile.mode == Mode.TARGET) {
@@ -409,6 +431,15 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             }
             rememberLocation(profile, bee);
         }
+    }
+
+    private void faceVelocity(Bee bee) {
+        Vector velocity = bee.getVelocity();
+        double horizontal = Math.sqrt(velocity.getX() * velocity.getX() + velocity.getZ() * velocity.getZ());
+        if (horizontal < 0.008) return;
+        float yaw = (float) Math.toDegrees(Math.atan2(-velocity.getX(), velocity.getZ()));
+        float pitch = (float) Math.toDegrees(Math.atan2(-velocity.getY(), horizontal));
+        bee.setRotation(yaw, Math.max(-25.0f, Math.min(25.0f, pitch)));
     }
 
     private boolean isOwnedBy(Bee bee, UUID owner) {
@@ -449,7 +480,12 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (profile.armor.isBlank()) return;
         Material material = Material.matchMaterial(profile.armor); if (material == null) return;
         ItemDisplay display = bee.getWorld().spawn(bee.getLocation(), ItemDisplay.class, entity -> {
-            entity.setItemStack(new ItemStack(material)); entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
+            entity.setItemStack(new ItemStack(material));
+            entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.HEAD);
+            // Меньший размер и смещение вверх выводят модель снаряжения над спинкой,
+            // вместо того чтобы крупный предмет проходил сквозь тело пчелы.
+            entity.setTransformation(new Transformation(new Vector3f(0.0f, -0.18f, 0.0f), new Quaternionf(),
+                    new Vector3f(0.48f, 0.48f, 0.48f), new Quaternionf()));
             entity.setPersistent(true); entity.getPersistentDataContainer().set(displayKey, PersistentDataType.STRING, bee.getUniqueId().toString());
         });
         bee.addPassenger(display);
