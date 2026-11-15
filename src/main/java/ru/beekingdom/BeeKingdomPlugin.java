@@ -684,6 +684,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     }
 
     private void tickBees() {
+        tickArmorDisplays();
         tickAdminBees();
         if (discoParty) tickDiscoParty();
          for (Map.Entry<UUID, BeeProfile> entry : profiles.entrySet()) {
@@ -813,6 +814,22 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         }
     }
 
+    private void tickArmorDisplays() {
+        // ItemDisplay является пассажиром пчелы и поэтому уже следует за её позицией.
+        // Но пассажиры не наследуют поворот сущности — синхронизируем yaw/pitch отдельно.
+        for (Map.Entry<UUID, Bee> entry : loadedBees.entrySet()) {
+            Bee bee = entry.getValue();
+            if (bee == null || !bee.isValid() || bee.isDead()) continue;
+            for (Entity passenger : bee.getPassengers()) {
+                if (passenger instanceof ItemDisplay display
+                        && bee.getUniqueId().toString().equals(
+                        display.getPersistentDataContainer().get(displayKey, PersistentDataType.STRING))) {
+                    display.setRotation(bee.getLocation().getYaw(), bee.getLocation().getPitch());
+                }
+            }
+        }
+    }
+
     private void applyArmorDisplay(Bee bee, BeeProfile profile) {
         removeArmorDisplay(bee);
         if (profile.armor.isBlank()) return;
@@ -824,7 +841,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             entity.setItemStack(armorItem);
             entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.NONE);
             entity.setBillboard(org.bukkit.entity.Display.Billboard.FIXED);
-            entity.setTransformation(new Transformation(new Vector3f(0.0f, -0.38f, 0.0f), new Quaternionf(),
+            // Поднимаем свитер ближе к корпусу, не меняя размер модели.
+            entity.setTransformation(new Transformation(new Vector3f(0.0f, -0.16f, 0.0f), new Quaternionf(),
                     new Vector3f(0.72f, 0.72f, 0.72f), new Quaternionf()));
             entity.setPersistent(true);
             entity.getPersistentDataContainer().set(displayKey, PersistentDataType.STRING, bee.getUniqueId().toString());
