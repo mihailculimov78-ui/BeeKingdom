@@ -73,6 +73,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         int chunkZ;
         boolean hasLocation;
         boolean fattened;
+        boolean saddled;
         BeeProfile(UUID owner) { this.owner = owner; }
     }
 
@@ -95,8 +96,9 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private final Set<UUID> waitingForArmyTarget = new HashSet<>();
     private final Map<UUID, Vector> freeFlightDirections = new HashMap<>();
     private final Map<UUID, Integer> freeFlightRefresh = new HashMap<>();
+    private final Map<UUID, LivingEntity> ridingAttackTargets = new HashMap<>();
 
-    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey;
+    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey, saddledKey;
 
     @Override public void onEnable() {
         ownerKey = new NamespacedKey(this, "owner");
@@ -106,6 +108,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         collarKey = new NamespacedKey(this, "bee_collar");
         displayKey = new NamespacedKey(this, "armor_display");
         fattenedKey = new NamespacedKey(this, "fattened");
+        saddledKey = new NamespacedKey(this, "saddled");
         saveDefaultConfig();
         loadProfiles();
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -133,6 +136,22 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private boolean isCollar(ItemStack item) {
         return item != null && item.getType() == Material.LEAD && item.hasItemMeta()
                 && item.getItemMeta().getPersistentDataContainer().has(collarKey, PersistentDataType.STRING);
+    }
+
+    @EventHandler public void onRidingAttack(PlayerInteractEvent event) {
+        if (event.getHand() != EquipmentSlot.HAND || (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK)) return;
+        Player rider = event.getPlayer();
+        if (!(rider.getVehicle() instanceof Bee bee)) return;
+        BeeProfile profile = profiles.get(bee.getUniqueId());
+        if (profile == null || !profile.fattened || !profile.saddled || !profile.owner.equals(rider.getUniqueId())) return;
+        Player target = bee.getWorld().getNearbyEntities(bee.getLocation(), 24, 16, 24).stream()
+                .filter(entity -> entity instanceof Player).map(entity -> (Player) entity)
+                .filter(candidate -> !candidate.getUniqueId().equals(rider.getUniqueId()))
+                .min(Comparator.comparingDouble(candidate -> candidate.getLocation().distanceSquared(bee.getLocation()))).orElse(null);
+        if (target != null) {
+            ridingAttackTargets.put(bee.getUniqueId(), target); bee.setTarget(target);
+            rider.sendMessage(ChatColor.YELLOW + "Пчела летит к ближайшему игроку: " + target.getName());
+        } else rider.sendMessage(ChatColor.RED + "Рядом нет других игроков.");
     }
 
     @EventHandler public void onTame(PlayerInteractEntityEvent event) {
@@ -185,6 +204,25 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private void applyBeeScale(Bee bee, BeeProfile profile) {
         var scale = bee.getAttribute(Attribute.SCALE);
         if (scale != null) scale.setBaseValue(profile.fattened ? 1.65 : 1.0);
+    }
+
+    @EventHandler public void onSaddleOrMount(PlayerInteractEntityEvent event) {
+        if (!(event.getRightClicked() instanceof Bee bee) || event.getHand() != EquipmentSlot.HAND) return;
+        BeeProfile profile = profiles.get(bee.getUniqueId());
+        if (profile == null || !profile.owner.equals(event.getPlayer().getUniqueId()) || !profile.fattened) return;
+        ItemStack hand = event.getPlayer().getInventory().getItemInMainHand();
+        if (!profile.saddled && hand.getType() == Material.SADDLE) {
+            event.setCancelled(true); profile.saddled = true;
+            if (event.getPlayer().getGameMode() != org.bukkit.GameMode.CREATIVE) hand.setAmount(hand.getAmount() - 1);
+            writeProfileToBee(bee, profile); saveProfiles();
+            event.getPlayer().sendMessage(ChatColor.GREEN + "Седло надето. Теперь можно оседлать пчелу.");
+        } else if (profile.saddled && hand.getType() != Material.SUGAR) {
+            event.setCancelled(true);
+            if (bee.getPassengers().isEmpty()) {
+                bee.addPassenger(event.getPlayer());
+                event.getPlayer().sendMessage(ChatColor.GREEN + "Ты оседлал большую пчелу. Смотри в нужную сторону для управления.");
+            }
+        }
     }
 
     @EventHandler public void onCollarUse(PlayerInteractEvent event) {
@@ -346,6 +384,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         BeeProfile profile = profiles.get(bee.getUniqueId()); if (profile == null) return;
         LivingEntity target = event.getTarget(); if (target == null) return;
         if (target instanceof Player player && player.getUniqueId().equals(profile.owner)) { event.setCancelled(true); return; }
+        if (profile.saddled && bee.getPassengers().stream().anyMatch(passenger -> passenger instanceof Player)) return;
         switch (profile.mode) {
             case FOLLOW, PEACEFUL -> event.setCancelled(true);
             // В свободном полёте пчела использует обычный AI и может защищаться.
@@ -434,6 +473,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             if (modeText != null) try { profile.mode = Mode.valueOf(modeText); } catch (IllegalArgumentException ignored) { }
             profile.targetName = valueOrEmpty(bee.getPersistentDataContainer().get(targetKey, PersistentDataType.STRING));
             profile.armor = valueOrEmpty(bee.getPersistentDataContainer().get(armorKey, PersistentDataType.STRING));
+            profile.fattened = Boolean.parseBoolean(valueOrEmpty(bee.getPersistentDataContainer().get(fattenedKey, PersistentDataType.STRING)));
+            profile.saddled = Boolean.parseBoolean(valueOrEmpty(bee.getPersistentDataContainer().get(saddledKey, PersistentDataType.STRING)));
             profiles.put(id, profile);
         }
         rememberLocation(profile, bee); loadedBees.put(id, bee);
@@ -452,6 +493,21 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             BeeProfile profile = entry.getValue();
             // Флаг ужаливания регулярно сбрасывается: таймер смерти после укуса не должен сработать.
             if (bee.hasStung()) bee.setHasStung(false);
+            Player rider = bee.getPassengers().stream().filter(passenger -> passenger instanceof Player).map(passenger -> (Player) passenger).findFirst().orElse(null);
+            if (rider != null && profile.fattened && profile.saddled) {
+                bee.setAware(true);
+                LivingEntity attackTarget = ridingAttackTargets.get(bee.getUniqueId());
+                if (attackTarget != null && (!attackTarget.isValid() || attackTarget.isDead() || !attackTarget.getWorld().equals(bee.getWorld()))) {
+                    ridingAttackTargets.remove(bee.getUniqueId()); attackTarget = null;
+                }
+                Vector direction = attackTarget != null
+                        ? attackTarget.getLocation().toVector().subtract(bee.getLocation().toVector()).normalize()
+                        : rider.getLocation().getDirection().normalize();
+                bee.setVelocity(direction.multiply(attackTarget != null ? 0.42 : 0.30));
+                faceVelocity(bee);
+                if (attackTarget != null) bee.setTarget(attackTarget);
+                continue;
+            }
             Player owner = Bukkit.getPlayer(profile.owner);
             if (profile.mode == Mode.FOLLOW) {
                 bee.setAware(false); bee.setTarget(null);
@@ -522,6 +578,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         pdc.set(targetKey, PersistentDataType.STRING, profile.targetName);
         pdc.set(armorKey, PersistentDataType.STRING, profile.armor);
         pdc.set(fattenedKey, PersistentDataType.STRING, Boolean.toString(profile.fattened));
+        pdc.set(saddledKey, PersistentDataType.STRING, Boolean.toString(profile.saddled));
     }
 
     private void removeArmorDisplay(Bee bee) {
@@ -702,6 +759,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             try { p.mode = Mode.valueOf(getConfig().getString("bees." + key + ".mode", "FOLLOW")); } catch (IllegalArgumentException ignored) { p.mode = Mode.FOLLOW; }
             p.targetName = getConfig().getString("bees." + key + ".target", ""); p.armor = getConfig().getString("bees." + key + ".armor", "");
             p.fattened = getConfig().getBoolean("bees." + key + ".fattened", false);
+            p.saddled = getConfig().getBoolean("bees." + key + ".saddled", false);
             p.world = getConfig().getString("bees." + key + ".world", ""); p.chunkX = getConfig().getInt("bees." + key + ".chunk-x");
             p.chunkZ = getConfig().getInt("bees." + key + ".chunk-z"); p.hasLocation = !p.world.isBlank() && getConfig().contains("bees." + key + ".chunk-x");
             profiles.put(id, p);
@@ -714,7 +772,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             String path = "bees." + entry.getKey(); BeeProfile p = entry.getValue();
             getConfig().set(path + ".owner", p.owner.toString()); getConfig().set(path + ".mode", p.mode.name());
             getConfig().set(path + ".target", p.targetName); getConfig().set(path + ".armor", p.armor);
-            getConfig().set(path + ".fattened", p.fattened);
+            getConfig().set(path + ".fattened", p.fattened); getConfig().set(path + ".saddled", p.saddled);
             if (p.hasLocation) { getConfig().set(path + ".world", p.world); getConfig().set(path + ".chunk-x", p.chunkX); getConfig().set(path + ".chunk-z", p.chunkZ); }
         }
         saveConfig();
