@@ -53,6 +53,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 import java.util.concurrent.ThreadLocalRandom;
 
 public final class BeeKingdomPlugin extends JavaPlugin implements Listener, CommandExecutor {
@@ -679,13 +680,47 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         player.openInventory(inv);
     }
 
+    private int countArmyItems(Player player, ItemStack cursor, Predicate<ItemStack> matches) {
+        int count = cursor != null && matches.test(cursor) ? cursor.getAmount() : 0;
+        for (ItemStack item : player.getInventory().getStorageContents())
+            if (item != null && matches.test(item)) count += item.getAmount();
+        return count;
+    }
+
+    private void consumeArmyItems(Player player, InventoryClickEvent event, Predicate<ItemStack> matches, int amount) {
+        int remaining = amount;
+        ItemStack cursor = event.getCursor();
+        if (cursor != null && matches.test(cursor)) {
+            int used = Math.min(remaining, cursor.getAmount());
+            remaining -= used;
+            if (cursor.getAmount() == used) event.setCursor(null);
+            else { cursor.setAmount(cursor.getAmount() - used); event.setCursor(cursor); }
+        }
+        for (int slot = 0; slot < player.getInventory().getStorageContents().length && remaining > 0; slot++) {
+            ItemStack item = player.getInventory().getItem(slot);
+            if (item == null || !matches.test(item)) continue;
+            int used = Math.min(remaining, item.getAmount());
+            remaining -= used;
+            if (item.getAmount() == used) player.getInventory().setItem(slot, null);
+            else { item.setAmount(item.getAmount() - used); player.getInventory().setItem(slot, item); }
+        }
+    }
+
+    private PotionEffectType effectFromPotion(ItemStack item) {
+        if (item == null || item.getType() != Material.POTION || !(item.getItemMeta() instanceof PotionMeta meta)) return null;
+        String potion = meta.getBasePotionType().name();
+        if (potion.contains("STRENGTH")) return PotionEffectType.STRENGTH;
+        if (potion.contains("SPEED")) return PotionEffectType.SPEED;
+        return null;
+    }
+
     private void applyArmyItem(Player player, InventoryClickEvent event, int slot) {
         List<Map.Entry<UUID, BeeProfile>> army = profiles.entrySet().stream().filter(e -> e.getValue().owner.equals(player.getUniqueId())).toList();
         if (army.isEmpty()) { player.sendMessage(ChatColor.RED + "У тебя пока нет приручённых пчёл."); return; }
         ItemStack cursor = event.getCursor();
         if (slot == 11) {
-            if (cursor == null || cursor.getAmount() < army.size() || !isHorseArmor(cursor.getType())) {
-                player.sendMessage(ChatColor.RED + "Нужно конской брони: " + army.size() + " шт."); return;
+            if (cursor == null || !isHorseArmor(cursor.getType()) || countArmyItems(player, cursor, item -> isHorseArmor(item.getType()) && item.getType() == cursor.getType()) < army.size()) {
+                player.sendMessage(ChatColor.RED + "Нужно конской брони одного типа: " + army.size() + " шт. (считаются предметы в инвентаре и на курсоре)."); return;
             }
             Material armor = cursor.getType();
             for (Map.Entry<UUID, BeeProfile> entry : army) {
@@ -695,28 +730,24 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
                 Bee bee = loadedBees.get(entry.getKey());
                 if (bee != null && bee.isValid()) { applyArmorDisplay(bee, p); writeProfileToBee(bee, p); }
             }
-            if (player.getGameMode() != org.bukkit.GameMode.CREATIVE) {
-                if (cursor.getAmount() == army.size()) event.setCursor(null);
-                else { cursor.setAmount(cursor.getAmount() - army.size()); event.setCursor(cursor); }
-            }
+            if (player.getGameMode() != org.bukkit.GameMode.CREATIVE)
+                consumeArmyItems(player, event, item -> item.getType() == armor, army.size());
             saveProfiles(); player.sendMessage(ChatColor.GREEN + "Броня выдана всем " + army.size() + " пчёлам.");
         } else {
-            if (cursor == null || cursor.getType() != Material.POTION || !(cursor.getItemMeta() instanceof PotionMeta meta) || cursor.getAmount() < army.size()) {
-                player.sendMessage(ChatColor.RED + "Нужно обычных зелий: " + army.size() + " шт."); return;
-            }
-            String potion = meta.getBasePotionType().name();
-            PotionEffectType effect = potion.contains("STRENGTH") ? PotionEffectType.STRENGTH : potion.contains("SPEED") ? PotionEffectType.SPEED : null;
+            PotionEffectType effect = effectFromPotion(cursor);
             if (effect == null) { player.sendMessage(ChatColor.RED + "Пока доступны только зелья Силы и Скорости."); return; }
+            Predicate<ItemStack> matchingPotion = item -> effectFromPotion(item) == effect;
+            if (countArmyItems(player, cursor, matchingPotion) < army.size()) {
+                player.sendMessage(ChatColor.RED + "Нужно зелий с эффектом " + effect.getName() + ": " + army.size() + " шт. (считаются предметы в инвентаре и на курсоре)."); return;
+            }
             for (Map.Entry<UUID, BeeProfile> entry : army) {
                 BeeProfile profile = entry.getValue();
                 profile.potionEffect = effect.getName();
                 Bee bee = loadedBees.get(entry.getKey());
                 if (bee != null && bee.isValid()) applyStoredPotionEffect(bee, profile);
             }
-            if (player.getGameMode() != org.bukkit.GameMode.CREATIVE) {
-                if (cursor.getAmount() == army.size()) event.setCursor(null);
-                else { cursor.setAmount(cursor.getAmount() - army.size()); event.setCursor(cursor); }
-            }
+            if (player.getGameMode() != org.bukkit.GameMode.CREATIVE)
+                consumeArmyItems(player, event, matchingPotion, army.size());
             player.sendMessage(ChatColor.GREEN + "Эффект " + effect.getName() + " выдан всему отряду.");
         }
         saveProfiles(); openArmyEquipmentMenu(player);
