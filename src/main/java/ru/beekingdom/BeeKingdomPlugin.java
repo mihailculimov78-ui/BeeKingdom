@@ -650,7 +650,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             profiles.put(id, profile);
         }
         rememberLocation(profile, bee); loadedBees.put(id, bee);
-        if (!profile.armor.isBlank()) applyArmorDisplay(bee, profile);
+        // Always reconcile the display, including when armor was removed while this chunk was unloaded.
+        applyArmorDisplay(bee, profile);
         applyBeeScale(bee, profile);
         applyBeeHealth(bee, false);
     }
