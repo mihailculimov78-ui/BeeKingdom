@@ -1,8 +1,8 @@
 name: BeeKingdom
-version: 0.1.0
+version: 0.2.0
 main: ru.beekingdom.BeeKingdomPlugin
 api-version: '26.3'
-author: OpenAI
+author: BeeKingdom
 website: https://papermc.io/
 description: Приручение и управление пчёлами
 commands:

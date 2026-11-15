@@ -1,5 +1,7 @@
 package ru.beekingdom;
 
+import io.papermc.paper.event.player.AsyncChatEvent;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
@@ -20,12 +22,12 @@ import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
-import io.papermc.paper.event.player.AsyncChatEvent;
-import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.ChunkUnloadEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
@@ -41,22 +43,17 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 public final class BeeKingdomPlugin extends JavaPlugin implements Listener, CommandExecutor {
     private enum Mode {
-        FOLLOW("Следовать за игроком"),
-        STAY("Свободный полёт"),
-        TARGET("В атаку: выбранная цель"),
-        PEACEFUL("Мирный режим"),
-        BERSERK("Я конченный, бегите!");
-
-        private final String title;
+        FOLLOW("Следовать за игроком"), STAY("Свободный полёт"), TARGET("Атака выбранной цели"),
+        PEACEFUL("Мирный режим"), BERSERK("Защита территории");
+        final String title;
         Mode(String title) { this.title = title; }
-        String title() { return title; }
     }
 
     private static final class BeeProfile {
@@ -64,6 +61,10 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         Mode mode = Mode.FOLLOW;
         String targetName = "";
         String armor = "";
+        String world = "";
+        int chunkX;
+        int chunkZ;
+        boolean hasLocation;
         BeeProfile(UUID owner) { this.owner = owner; }
     }
 
@@ -73,90 +74,73 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         final UUID beeId;
         final List<UUID> entries = new ArrayList<>();
         Inventory inventory;
-        MenuHolder(boolean detail, int page, UUID beeId) {
-            this.detail = detail; this.page = page; this.beeId = beeId;
-        }
+        MenuHolder(boolean detail, int page, UUID beeId) { this.detail = detail; this.page = page; this.beeId = beeId; }
         @Override public Inventory getInventory() { return inventory; }
     }
 
     private final Map<UUID, BeeProfile> profiles = new HashMap<>();
     private final Map<UUID, Bee> loadedBees = new HashMap<>();
+    // Tombstones let the plugin release bees even when their chunks are currently unloaded.
+    private final Set<UUID> releasedBees = new HashSet<>();
+    private final Map<UUID, UUID> pendingBeeTarget = new HashMap<>();
     private final Set<UUID> waitingForTarget = new HashSet<>();
     private final Set<UUID> waitingForArmyTarget = new HashSet<>();
 
-    private NamespacedKey ownerKey;
-    private NamespacedKey modeKey;
-    private NamespacedKey targetKey;
-    private NamespacedKey armorKey;
-    private NamespacedKey collarKey;
-    private NamespacedKey displayKey;
+    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey;
 
-    @Override
-    public void onEnable() {
+    @Override public void onEnable() {
         ownerKey = new NamespacedKey(this, "owner");
         modeKey = new NamespacedKey(this, "mode");
         targetKey = new NamespacedKey(this, "target");
         armorKey = new NamespacedKey(this, "armor");
         collarKey = new NamespacedKey(this, "bee_collar");
         displayKey = new NamespacedKey(this, "armor_display");
-
         saveDefaultConfig();
         loadProfiles();
         Bukkit.getPluginManager().registerEvents(this, this);
         if (getCommand("beekdom") != null) getCommand("beekdom").setExecutor(this);
         registerCollarRecipe();
-
-        for (World world : Bukkit.getWorlds()) {
-            for (Entity entity : world.getEntities()) {
-                if (entity instanceof Bee bee) registerLoadedBee(bee);
-            }
-        }
-        Bukkit.getScheduler().runTaskTimer(this, this::tickBees, 20L, 10L);
-        getLogger().info("BeeKingdom включён. Загружено профилей пчёл: " + profiles.size());
+        for (World world : Bukkit.getWorlds()) for (Entity entity : world.getEntities()) if (entity instanceof Bee bee) registerLoadedBee(bee);
+        cleanupAlreadyLoadedChunks();
+        Bukkit.getScheduler().runTaskTimer(this, this::tickBees, 1L, 2L);
+        getLogger().info("BeeKingdom включён. Профилей пчёл: " + profiles.size());
     }
 
-    @Override
-    public void onDisable() {
-        saveProfiles();
-        loadedBees.clear();
-    }
+    @Override public void onDisable() { saveProfiles(); loadedBees.clear(); }
 
     private void registerCollarRecipe() {
-        ItemStack collar = new ItemStack(Material.LEAD);
-        ItemMeta meta = collar.getItemMeta();
-        meta.setDisplayName(ChatColor.GOLD + "Ошейник пчеловода");
-        meta.setLore(List.of(ChatColor.GRAY + "ПКМ по воздуху — открыть улей", ChatColor.YELLOW + "BeeKingdom"));
-        meta.getPersistentDataContainer().set(collarKey, PersistentDataType.STRING, "true");
-        collar.setItemMeta(meta);
-        ShapedRecipe recipe = new ShapedRecipe(new NamespacedKey(this, "bee_collar"), collar);
+        ItemStack item = namedItem(Material.LEAD, ChatColor.GOLD + "Ошейник пчеловода",
+                List.of(ChatColor.GRAY + "ПКМ — открыть улей", ChatColor.YELLOW + "BeeKingdom"));
+        item.editMeta(meta -> meta.getPersistentDataContainer().set(collarKey, PersistentDataType.STRING, "true"));
+        ShapedRecipe recipe = new ShapedRecipe(new NamespacedKey(this, "bee_collar"), item);
         recipe.shape("LLL", "L L", "LLL");
         recipe.setIngredient('L', Material.LEAD);
+        Bukkit.removeRecipe(new NamespacedKey(this, "bee_collar"));
         Bukkit.addRecipe(recipe);
     }
 
     private boolean isCollar(ItemStack item) {
-        if (item == null || item.getType() != Material.LEAD || !item.hasItemMeta()) return false;
-        return item.getItemMeta().getPersistentDataContainer().has(collarKey, PersistentDataType.STRING);
+        return item != null && item.getType() == Material.LEAD && item.hasItemMeta()
+                && item.getItemMeta().getPersistentDataContainer().has(collarKey, PersistentDataType.STRING);
     }
 
-    @EventHandler
-    public void onTame(PlayerInteractEntityEvent event) {
-        if (!(event.getRightClicked() instanceof Bee bee)) return;
-        if (event.getHand() != org.bukkit.inventory.EquipmentSlot.HAND) return;
+    @EventHandler public void onTame(PlayerInteractEntityEvent event) {
+        if (!(event.getRightClicked() instanceof Bee bee) || event.getHand() != EquipmentSlot.HAND) return;
         Player player = event.getPlayer();
         ItemStack hand = player.getInventory().getItemInMainHand();
         if (hand.getType() != Material.POPPY) return;
-
-        PersistentDataContainer pdc = bee.getPersistentDataContainer();
-        if (pdc.has(ownerKey, PersistentDataType.STRING)) {
-            player.sendMessage(ChatColor.RED + "Эта пчела уже приручена.");
-            return;
+        if (bee.getPersistentDataContainer().has(ownerKey, PersistentDataType.STRING)) {
+            player.sendMessage(ChatColor.RED + "Эта пчела уже приручена."); return;
         }
         event.setCancelled(true);
-        if (player.getGameMode() != org.bukkit.GameMode.CREATIVE) {
-            hand.setAmount(hand.getAmount() - 1);
+        if (player.getGameMode() != org.bukkit.GameMode.CREATIVE) hand.setAmount(hand.getAmount() - 1);
+        double chance = Math.max(0.0, Math.min(1.0, getConfig().getDouble("taming-chance", 0.35)));
+        if (ThreadLocalRandom.current().nextDouble() >= chance) {
+            player.sendMessage(ChatColor.YELLOW + "Пчела пока не доверяет тебе. Попробуй ещё раз!");
+            return;
         }
         BeeProfile profile = new BeeProfile(player.getUniqueId());
+        rememberLocation(profile, bee);
         profiles.put(bee.getUniqueId(), profile);
         loadedBees.put(bee.getUniqueId(), bee);
         writeProfileToBee(bee, profile);
@@ -165,102 +149,115 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         bee.setCustomName(ChatColor.YELLOW + "Пчела " + player.getName());
         bee.setCustomNameVisible(true);
         saveProfiles();
-        player.sendMessage(ChatColor.GREEN + "Пчела приручена! Теперь она принадлежит тебе.");
+        player.sendMessage(ChatColor.GREEN + "Пчела приручена! Она теперь принадлежит тебе.");
     }
 
-    @EventHandler
-    public void onCollarUse(PlayerInteractEvent event) {
-        if (event.getHand() != org.bukkit.inventory.EquipmentSlot.HAND) return;
-        if (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+    @EventHandler public void onCollarUse(PlayerInteractEvent event) {
+        if (event.getHand() != EquipmentSlot.HAND || (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK)) return;
         if (!isCollar(event.getItem())) return;
         event.setCancelled(true);
         openMainMenu(event.getPlayer(), 0);
     }
 
-    @EventHandler
-    public void onInventoryClick(InventoryClickEvent event) {
+    @EventHandler public void onInventoryClick(InventoryClickEvent event) {
         if (!(event.getWhoClicked() instanceof Player player)) return;
         if (!(event.getView().getTopInventory().getHolder() instanceof MenuHolder holder)) return;
+        int raw = event.getRawSlot();
+        int topSize = event.getView().getTopInventory().getSize();
+        if (raw < 0) { event.setCancelled(true); return; }
+        if (raw >= topSize) {
+            // Разрешаем обычный клик в инвентаре игрока, чтобы он мог взять броню на курсор.
+            // Shift-клик запрещён, иначе предмет попадёт в GUI автоматически.
+            if (event.isShiftClick()) event.setCancelled(true);
+            return;
+        }
         event.setCancelled(true);
-        int slot = event.getRawSlot();
-        if (slot < 0 || slot >= event.getView().getTopInventory().getSize()) return;
-
         if (!holder.detail) {
-            if (slot >= 0 && slot < holder.entries.size() && slot < 36) {
-                openBeeMenu(player, holder.entries.get(slot));
-                return;
-            }
-            if (slot >= 45 && slot <= 49) {
+            if (raw < holder.entries.size()) { openBeeMenu(player, holder.entries.get(raw)); return; }
+            if (raw >= 45 && raw <= 49) {
                 Mode[] modes = {Mode.FOLLOW, Mode.STAY, Mode.TARGET, Mode.PEACEFUL, Mode.BERSERK};
-                Mode selected = modes[slot - 45];
-                if (selected == Mode.TARGET) {
-                    waitingForArmyTarget.add(player.getUniqueId());
-                    player.closeInventory();
-                    player.sendMessage(ChatColor.YELLOW + "Напиши в чат ник игрока, на которого должна охотиться вся твоя армия. Напиши отмена для отмены.");
-                } else {
-                    setArmyMode(player.getUniqueId(), selected, "");
-                    openMainMenu(player, holder.page);
-                }
+                Mode mode = modes[raw - 45];
+                if (mode == Mode.TARGET) {
+                    waitingForArmyTarget.add(player.getUniqueId()); player.closeInventory();
+                    player.sendMessage(ChatColor.YELLOW + "Напиши в чат ник игрока. Напиши «отмена», чтобы отменить.");
+                } else { setArmyMode(player.getUniqueId(), mode, ""); openMainMenu(player, holder.page); }
                 return;
             }
-            if (slot == 51 && holder.page > 0) openMainMenu(player, holder.page - 1);
-            if (slot == 53) openMainMenu(player, holder.page + 1);
+            if (raw == 51 && holder.page > 0) openMainMenu(player, holder.page - 1);
+            if (raw == 53) openMainMenu(player, holder.page + 1);
             return;
         }
 
-        BeeProfile profile = profiles.get(holder.beeId);
-        Bee bee = loadedBees.get(holder.beeId);
-        if (profile == null || bee == null || !bee.isValid()) {
-            player.sendMessage(ChatColor.RED + "Эта пчела сейчас не загружена. Подойди ближе к её чанку.");
-            player.closeInventory();
-            return;
+        UUID beeId = holder.beeId;
+        BeeProfile profile = profiles.get(beeId);
+        Bee bee = loadedBees.get(beeId);
+        if (raw == 49) { openMainMenu(player, 0); return; }
+        if (raw == 34) { releaseBee(player, beeId); return; }
+        if (profile == null || bee == null || !bee.isValid() || bee.isDead()) {
+            player.sendMessage(ChatColor.RED + "Пчела сейчас не загружена. Подойди к её чанку."); player.closeInventory(); return;
         }
-        if (slot == 40) {
-            openMainMenu(player, 0);
-            return;
-        }
-        if (slot == 10) setMode(player, holder.beeId, Mode.FOLLOW, "");
-        else if (slot == 12) setMode(player, holder.beeId, Mode.STAY, "");
-        else if (slot == 14) {
-            pendingBeeTarget.put(player.getUniqueId(), holder.beeId);
-            waitingForTarget.add(player.getUniqueId());
-            player.closeInventory();
-            player.sendMessage(ChatColor.YELLOW + "Напиши в чат ник игрока для этой пчелы. Напиши отмена для отмены.");
-            return;
-        } else if (slot == 16) setMode(player, holder.beeId, Mode.PEACEFUL, "");
-        else if (slot == 28) setMode(player, holder.beeId, Mode.BERSERK, "");
-        else if (slot == 31) {
+        if (raw == 10) setMode(player, beeId, Mode.FOLLOW, "");
+        else if (raw == 12) setMode(player, beeId, Mode.STAY, "");
+        else if (raw == 14) {
+            pendingBeeTarget.put(player.getUniqueId(), beeId); waitingForTarget.add(player.getUniqueId()); player.closeInventory();
+            player.sendMessage(ChatColor.YELLOW + "Напиши в чат ник онлайн-игрока. Напиши «отмена», чтобы отменить."); return;
+        } else if (raw == 16) setMode(player, beeId, Mode.PEACEFUL, "");
+        else if (raw == 28) setMode(player, beeId, Mode.BERSERK, "");
+        else if (raw == 31) {
             ItemStack cursor = event.getCursor();
             if (cursor != null && isHorseArmor(cursor.getType())) {
+                if (!profile.armor.isBlank()) giveArmor(player, profile.armor);
                 profile.armor = cursor.getType().name();
-                if (cursor.getAmount() <= 1) event.setCursor(new ItemStack(Material.AIR));
+                if (cursor.getAmount() <= 1) event.setCursor(null);
                 else { cursor.setAmount(cursor.getAmount() - 1); event.setCursor(cursor); }
-                applyArmorDisplay(bee, profile);
-                saveProfiles();
-                openBeeMenu(player, holder.beeId);
-                return;
+                applyArmorDisplay(bee, profile); writeProfileToBee(bee, profile); saveProfiles(); openBeeMenu(player, beeId); return;
             }
             if (!profile.armor.isBlank()) {
-                Material old = Material.matchMaterial(profile.armor);
-                if (old != null) {
-                    Map<Integer, ItemStack> leftovers = player.getInventory().addItem(new ItemStack(old));
-                    leftovers.values().forEach(item -> player.getWorld().dropItemNaturally(player.getLocation(), item));
-                }
-                profile.armor = "";
-                applyArmorDisplay(bee, profile);
-                saveProfiles();
-                openBeeMenu(player, holder.beeId);
-                return;
+                giveArmor(player, profile.armor); profile.armor = "";
+                applyArmorDisplay(bee, profile); writeProfileToBee(bee, profile); saveProfiles(); openBeeMenu(player, beeId); return;
             }
-            player.sendMessage(ChatColor.YELLOW + "Положи конскую броню на курсор и нажми на этот слот.");
-            return;
+            player.sendMessage(ChatColor.YELLOW + "Возьми конскую броню на курсор и нажми на слот экипировки."); return;
         }
-        saveProfiles();
-        openBeeMenu(player, holder.beeId);
+        saveProfiles(); openBeeMenu(player, beeId);
     }
 
-    @EventHandler
-    public void onChatTarget(AsyncChatEvent event) {
+    @EventHandler public void onInventoryDrag(InventoryDragEvent event) {
+        if (!(event.getView().getTopInventory().getHolder() instanceof MenuHolder)) return;
+        int top = event.getView().getTopInventory().getSize();
+        if (event.getRawSlots().stream().anyMatch(slot -> slot < top)) event.setCancelled(true);
+    }
+
+    private boolean isHorseArmor(Material material) { return material.name().endsWith("_HORSE_ARMOR"); }
+    private void giveArmor(Player player, String name) {
+        Material material = Material.matchMaterial(name);
+        if (material == null) return;
+        Map<Integer, ItemStack> leftovers = player.getInventory().addItem(new ItemStack(material));
+        leftovers.values().forEach(item -> player.getWorld().dropItemNaturally(player.getLocation(), item));
+    }
+
+    private void releaseBee(Player player, UUID beeId) {
+        BeeProfile profile = profiles.get(beeId);
+        if (profile == null || !profile.owner.equals(player.getUniqueId())) return;
+        Bee bee = loadedBees.get(beeId);
+        if (bee != null && bee.isValid()) {
+            removeArmorDisplay(bee);
+            PersistentDataContainer pdc = bee.getPersistentDataContainer();
+            pdc.remove(ownerKey); pdc.remove(modeKey); pdc.remove(targetKey); pdc.remove(armorKey);
+            bee.setAware(true); bee.setTarget(null); bee.setCustomName(null); bee.setCustomNameVisible(false);
+            bee.setPersistent(false); bee.setRemoveWhenFarAway(true);
+            releasedBees.remove(beeId);
+        } else {
+            // При загрузке этого чанка удалим метки приручения из самой сущности.
+            releasedBees.add(beeId);
+        }
+        profiles.remove(beeId); loadedBees.remove(beeId);
+        pendingBeeTarget.values().removeIf(id -> id.equals(beeId));
+        saveProfiles();
+        player.sendMessage(ChatColor.GREEN + "Пчела отпущена. Она больше не связана с твоим ошейником.");
+        openMainMenu(player, 0);
+    }
+
+    @EventHandler public void onChatTarget(AsyncChatEvent event) {
         UUID playerId = event.getPlayer().getUniqueId();
         boolean single = waitingForTarget.remove(playerId);
         boolean army = waitingForArmyTarget.remove(playerId);
@@ -268,184 +265,168 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         event.setCancelled(true);
         String input = PlainTextComponentSerializer.plainText().serialize(event.message()).trim();
         Bukkit.getScheduler().runTask(this, () -> {
-            Player player = Bukkit.getPlayer(playerId);
-            if (player == null) return;
+            Player player = Bukkit.getPlayer(playerId); if (player == null) return;
             if (input.equalsIgnoreCase("отмена") || input.equalsIgnoreCase("cancel")) {
-                player.sendMessage(ChatColor.GRAY + "Выбор цели отменён.");
-                return;
+                pendingBeeTarget.remove(playerId); player.sendMessage(ChatColor.GRAY + "Выбор цели отменён."); return;
             }
             Player target = Bukkit.getPlayerExact(input);
-            if (target == null) {
-                player.sendMessage(ChatColor.RED + "Игрок с таким ником сейчас не найден онлайн.");
-                return;
-            }
-            if (army) {
-                setArmyMode(playerId, Mode.TARGET, target.getName());
-                player.sendMessage(ChatColor.GREEN + "Вся твоя армия получила цель: " + target.getName());
-                openMainMenu(player, 0);
-            } else {
-                // Выбираем пчелу из последнего открытого меню по выбранному профилю-владельцу.
-                UUID beeId = findMostRecentOwnedBee(playerId);
-                if (beeId == null) {
-                    player.sendMessage(ChatColor.RED + "Не удалось определить пчелу. Открой её меню и повтори.");
-                    return;
-                }
-                setMode(player, beeId, Mode.TARGET, target.getName());
-                openBeeMenu(player, beeId);
+            if (target == null) { player.sendMessage(ChatColor.RED + "Игрок с таким ником не найден онлайн."); return; }
+            if (army) { setArmyMode(playerId, Mode.TARGET, target.getName()); player.sendMessage(ChatColor.GREEN + "Цель армии: " + target.getName()); openMainMenu(player, 0); }
+            else {
+                UUID beeId = pendingBeeTarget.remove(playerId);
+                if (beeId == null || !profiles.containsKey(beeId)) { player.sendMessage(ChatColor.RED + "Не удалось найти выбранную пчелу."); return; }
+                setMode(player, beeId, Mode.TARGET, target.getName()); openBeeMenu(player, beeId);
             }
         });
     }
 
-    // A chat target selection is tied to a single pending bee, not to whichever bee happens to be nearest.
-    private final Map<UUID, UUID> pendingBeeTarget = new HashMap<>();
-
-    private UUID findMostRecentOwnedBee(UUID owner) {
-        return pendingBeeTarget.remove(owner);
-    }
-
-    @EventHandler
-    public void onBeeTarget(EntityTargetLivingEntityEvent event) {
+    @EventHandler public void onBeeTarget(EntityTargetLivingEntityEvent event) {
         if (!(event.getEntity() instanceof Bee bee)) return;
-        BeeProfile profile = profiles.get(bee.getUniqueId());
-        if (profile == null) return;
-        LivingEntity target = event.getTarget();
-        if (target == null) return;
-        if (target instanceof Player player && player.getUniqueId().equals(profile.owner)) {
-            event.setCancelled(true);
-            return;
-        }
+        BeeProfile profile = profiles.get(bee.getUniqueId()); if (profile == null) return;
+        LivingEntity target = event.getTarget(); if (target == null) return;
+        if (target instanceof Player player && player.getUniqueId().equals(profile.owner)) { event.setCancelled(true); return; }
         switch (profile.mode) {
             case FOLLOW, STAY, PEACEFUL -> event.setCancelled(true);
-            case TARGET -> {
-                if (!(target instanceof Player player) || !player.getName().equalsIgnoreCase(profile.targetName)) event.setCancelled(true);
-            }
-            case BERSERK -> {
-                if (target instanceof Bee otherBee) {
-                    String otherOwner = otherBee.getPersistentDataContainer().get(ownerKey, PersistentDataType.STRING);
-                    if (profile.owner.toString().equals(otherOwner)) event.setCancelled(true);
-                }
-            }
+            case TARGET -> { if (!(target instanceof Player player) || !player.getName().equalsIgnoreCase(profile.targetName)) event.setCancelled(true); }
+            case BERSERK -> { if (target instanceof Bee other && isOwnedBy(other, profile.owner)) event.setCancelled(true); }
         }
     }
 
-    @EventHandler
-    public void onBeeDamageOwner(EntityDamageByEntityEvent event) {
+    @EventHandler public void onBeeDamage(EntityDamageByEntityEvent event) {
         if (event.getEntity() instanceof Bee victim && event.getDamager() instanceof Player attacker) {
             BeeProfile victimProfile = profiles.get(victim.getUniqueId());
-            if (victimProfile != null && !attacker.getUniqueId().equals(victimProfile.owner)) {
-                event.setCancelled(true);
-                return;
-            }
+            if (victimProfile != null && !attacker.getUniqueId().equals(victimProfile.owner)) { event.setCancelled(true); return; }
         }
         if (event.getDamager() instanceof Bee bee) {
             BeeProfile profile = profiles.get(bee.getUniqueId());
-            if (profile != null && event.getEntity() instanceof Player player && player.getUniqueId().equals(profile.owner)) {
-                event.setCancelled(true);
+            if (profile != null) {
+                if (event.getEntity() instanceof Player player && player.getUniqueId().equals(profile.owner)) event.setCancelled(true);
+                // Сбрасываем флаг ужаливания, чтобы приручённая пчела не погибала после атаки.
+                Bukkit.getScheduler().runTask(this, () -> { if (bee.isValid()) bee.setHasStung(false); });
             }
         }
     }
 
-    @EventHandler
-    public void onBeeDeath(EntityDeathEvent event) {
+    @EventHandler public void onBeeDeath(EntityDeathEvent event) {
         if (!(event.getEntity() instanceof Bee bee)) return;
-        BeeProfile profile = profiles.remove(bee.getUniqueId());
-        if (profile == null) return;
-        if (!profile.armor.isBlank()) {
-            Material armor = Material.matchMaterial(profile.armor);
-            if (armor != null) event.getDrops().add(new ItemStack(armor));
+        BeeProfile profile = profiles.remove(bee.getUniqueId()); if (profile == null) return;
+        if (!profile.armor.isBlank()) { Material armor = Material.matchMaterial(profile.armor); if (armor != null) event.getDrops().add(new ItemStack(armor)); }
+        removeArmorDisplay(bee); loadedBees.remove(bee.getUniqueId());
+        pendingBeeTarget.values().removeIf(id -> id.equals(bee.getUniqueId())); saveProfiles();
+    }
+
+    @EventHandler public void onChunkLoad(ChunkLoadEvent event) {
+        for (Entity entity : event.getChunk().getEntities()) if (entity instanceof Bee bee) registerLoadedBee(bee);
+        boolean changed = profiles.entrySet().removeIf(entry -> {
+            BeeProfile p = entry.getValue();
+            return p.hasLocation && p.world.equals(event.getWorld().getName()) && p.chunkX == event.getChunk().getX()
+                    && p.chunkZ == event.getChunk().getZ() && !loadedBees.containsKey(entry.getKey());
+        });
+        if (changed) saveProfiles();
+    }
+
+    @EventHandler public void onChunkUnload(ChunkUnloadEvent event) {
+        for (Entity entity : event.getChunk().getEntities()) if (entity instanceof Bee bee) {
+            BeeProfile profile = profiles.get(bee.getUniqueId());
+            if (profile != null) rememberLocation(profile, bee);
+            loadedBees.remove(bee.getUniqueId());
         }
-        loadedBees.remove(bee.getUniqueId());
-        pendingBeeTarget.values().removeIf(id -> id.equals(bee.getUniqueId()));
         saveProfiles();
     }
 
-    @EventHandler
-    public void onChunkLoad(ChunkLoadEvent event) {
-        for (Entity entity : event.getChunk().getEntities()) if (entity instanceof Bee bee) registerLoadedBee(bee);
-    }
-
-    @EventHandler
-    public void onChunkUnload(ChunkUnloadEvent event) {
-        for (Entity entity : event.getChunk().getEntities()) if (entity instanceof Bee bee) loadedBees.remove(bee.getUniqueId());
+    private void cleanupAlreadyLoadedChunks() {
+        boolean changed = profiles.entrySet().removeIf(entry -> {
+            BeeProfile p = entry.getValue();
+            if (!p.hasLocation) return false;
+            World world = Bukkit.getWorld(p.world);
+            return world != null && world.isChunkLoaded(p.chunkX, p.chunkZ) && !loadedBees.containsKey(entry.getKey());
+        });
+        if (changed) saveProfiles();
     }
 
     private void registerLoadedBee(Bee bee) {
+        UUID id = bee.getUniqueId();
+        if (releasedBees.remove(id)) {
+            removeArmorDisplay(bee);
+            PersistentDataContainer releasedPdc = bee.getPersistentDataContainer();
+            releasedPdc.remove(ownerKey); releasedPdc.remove(modeKey); releasedPdc.remove(targetKey); releasedPdc.remove(armorKey);
+            bee.setAware(true); bee.setTarget(null); bee.setCustomName(null); bee.setCustomNameVisible(false);
+            bee.setPersistent(false); bee.setRemoveWhenFarAway(true);
+            saveProfiles();
+            return;
+        }
         String ownerText = bee.getPersistentDataContainer().get(ownerKey, PersistentDataType.STRING);
         if (ownerText == null) return;
-        UUID id = bee.getUniqueId();
         BeeProfile profile = profiles.get(id);
         if (profile == null) {
-            try { profile = new BeeProfile(UUID.fromString(ownerText)); }
-            catch (IllegalArgumentException ignored) { return; }
+            try { profile = new BeeProfile(UUID.fromString(ownerText)); } catch (IllegalArgumentException ex) { return; }
             String modeText = bee.getPersistentDataContainer().get(modeKey, PersistentDataType.STRING);
-            if (modeText != null) {
-                try { profile.mode = Mode.valueOf(modeText); } catch (IllegalArgumentException ignored) { }
-            }
+            if (modeText != null) try { profile.mode = Mode.valueOf(modeText); } catch (IllegalArgumentException ignored) { }
             profile.targetName = valueOrEmpty(bee.getPersistentDataContainer().get(targetKey, PersistentDataType.STRING));
             profile.armor = valueOrEmpty(bee.getPersistentDataContainer().get(armorKey, PersistentDataType.STRING));
             profiles.put(id, profile);
         }
-        loadedBees.put(id, bee);
+        rememberLocation(profile, bee); loadedBees.put(id, bee);
         if (!profile.armor.isBlank()) applyArmorDisplay(bee, profile);
+    }
+
+    private void rememberLocation(BeeProfile profile, Bee bee) {
+        profile.world = bee.getWorld().getName(); profile.chunkX = bee.getLocation().getBlockX() >> 4;
+        profile.chunkZ = bee.getLocation().getBlockZ() >> 4; profile.hasLocation = true;
     }
 
     private void tickBees() {
         for (Map.Entry<UUID, BeeProfile> entry : profiles.entrySet()) {
-            Bee bee = loadedBees.get(entry.getKey());
-            if (bee == null || !bee.isValid() || bee.isDead()) continue;
+            Bee bee = loadedBees.get(entry.getKey()); if (bee == null || !bee.isValid() || bee.isDead()) continue;
             BeeProfile profile = entry.getValue();
+            // Флаг ужаливания регулярно сбрасывается: таймер смерти после укуса не должен сработать.
+            if (bee.hasStung()) bee.setHasStung(false);
             Player owner = Bukkit.getPlayer(profile.owner);
-            if (profile.mode == Mode.FOLLOW && owner != null && owner.isOnline() && owner.getWorld().equals(bee.getWorld())) {
+            if (profile.mode == Mode.FOLLOW) {
+                bee.setAware(false); bee.setTarget(null);
+                if (owner == null || !owner.isOnline() || !owner.getWorld().equals(bee.getWorld())) continue;
                 double distance = owner.getLocation().distance(bee.getLocation());
-                if (distance > 28) {
-                    bee.teleport(owner.getLocation().clone().add(1.2, 1.0, 0));
-                } else if (distance > 3.5) {
-                    Vector direction = owner.getLocation().toVector().subtract(bee.getLocation().toVector()).normalize().multiply(0.16);
-                    bee.setVelocity(bee.getVelocity().multiply(0.55).add(direction));
-                }
-                bee.setTarget(null);
-            } else if (profile.mode == Mode.STAY || profile.mode == Mode.PEACEFUL) {
-                bee.setTarget(null);
+                if (distance > 28) bee.teleport(owner.getLocation().clone().add(1.0, 1.0, 0));
+                else if (distance > 2.8) {
+                    Vector direction = owner.getLocation().toVector().subtract(bee.getLocation().toVector()).normalize().multiply(0.22);
+                    bee.setVelocity(bee.getVelocity().multiply(0.35).add(direction));
+                } else bee.setVelocity(bee.getVelocity().multiply(0.45));
+            } else if (profile.mode == Mode.STAY) {
+                bee.setAware(false); bee.setTarget(null); bee.setVelocity(bee.getVelocity().multiply(0.35));
+            } else if (profile.mode == Mode.PEACEFUL) {
+                bee.setAware(true); bee.setTarget(null);
             } else if (profile.mode == Mode.TARGET) {
-                Player target = Bukkit.getPlayerExact(profile.targetName);
-                if (target != null && target.getWorld().equals(bee.getWorld()) && target.getLocation().distanceSquared(bee.getLocation()) <= 625) {
-                    bee.setTarget(target);
-                } else bee.setTarget(null);
+                bee.setAware(true); Player target = Bukkit.getPlayerExact(profile.targetName);
+                if (target != null && target.getWorld().equals(bee.getWorld()) && target.getLocation().distanceSquared(bee.getLocation()) <= 625) bee.setTarget(target);
+                else bee.setTarget(null);
             } else if (profile.mode == Mode.BERSERK) {
-                LivingEntity target = bee.getNearbyEntities(16, 16, 16).stream()
-                        .filter(entity -> entity instanceof LivingEntity)
-                        .filter(entity -> !entity.getUniqueId().equals(profile.owner))
-                        .filter(entity -> {
-                            if (!(entity instanceof Bee otherBee)) return true;
-                            String otherOwner = otherBee.getPersistentDataContainer().get(ownerKey, PersistentDataType.STRING);
-                            return !profile.owner.toString().equals(otherOwner);
-                        })
-                        .map(entity -> (LivingEntity) entity)
-                        .min(Comparator.comparingDouble(entity -> entity.getLocation().distanceSquared(bee.getLocation())))
-                        .orElse(null);
+                bee.setAware(true);
+                LivingEntity target = bee.getNearbyEntities(16, 16, 16).stream().filter(e -> e instanceof LivingEntity)
+                        .filter(e -> !e.getUniqueId().equals(profile.owner))
+                        .filter(e -> !(e instanceof Bee other && isOwnedBy(other, profile.owner)))
+                        .map(e -> (LivingEntity) e).min(Comparator.comparingDouble(e -> e.getLocation().distanceSquared(bee.getLocation()))).orElse(null);
                 bee.setTarget(target);
             }
+            rememberLocation(profile, bee);
         }
     }
 
+    private boolean isOwnedBy(Bee bee, UUID owner) {
+        String value = bee.getPersistentDataContainer().get(ownerKey, PersistentDataType.STRING);
+        return owner.toString().equals(value);
+    }
+
     private void setMode(Player player, UUID beeId, Mode mode, String target) {
-        BeeProfile profile = profiles.get(beeId);
-        if (profile == null || !profile.owner.equals(player.getUniqueId())) return;
-        profile.mode = mode;
-        profile.targetName = target == null ? "" : target;
-        Bee bee = loadedBees.get(beeId);
-        if (bee != null) writeProfileToBee(bee, profile);
-        player.sendMessage(ChatColor.GREEN + "Режим пчелы: " + mode.title() + " — ON");
+        BeeProfile profile = profiles.get(beeId); if (profile == null || !profile.owner.equals(player.getUniqueId())) return;
+        profile.mode = mode; profile.targetName = target == null ? "" : target;
+        Bee bee = loadedBees.get(beeId); if (bee != null) { writeProfileToBee(bee, profile); bee.setAware(mode != Mode.FOLLOW && mode != Mode.STAY); }
+        player.sendMessage(ChatColor.GREEN + "Режим пчелы: " + mode.title + " — включён.");
     }
 
     private void setArmyMode(UUID owner, Mode mode, String target) {
-        for (Map.Entry<UUID, BeeProfile> entry : profiles.entrySet()) {
-            BeeProfile profile = entry.getValue();
-            if (!profile.owner.equals(owner)) continue;
-            profile.mode = mode;
-            profile.targetName = target == null ? "" : target;
-            Bee bee = loadedBees.get(entry.getKey());
-            if (bee != null) writeProfileToBee(bee, profile);
+        for (Map.Entry<UUID, BeeProfile> entry : profiles.entrySet()) if (entry.getValue().owner.equals(owner)) {
+            BeeProfile p = entry.getValue(); p.mode = mode; p.targetName = target == null ? "" : target;
+            Bee bee = loadedBees.get(entry.getKey()); if (bee != null) { writeProfileToBee(bee, p); bee.setAware(mode != Mode.FOLLOW && mode != Mode.STAY); }
         }
         saveProfiles();
     }
@@ -458,161 +439,121 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         pdc.set(armorKey, PersistentDataType.STRING, profile.armor);
     }
 
+    private void removeArmorDisplay(Bee bee) {
+        for (Entity passenger : new ArrayList<>(bee.getPassengers())) if (passenger instanceof ItemDisplay display
+                && display.getPersistentDataContainer().has(displayKey, PersistentDataType.STRING)) display.remove();
+    }
+
     private void applyArmorDisplay(Bee bee, BeeProfile profile) {
-        for (Entity passenger : new ArrayList<>(bee.getPassengers())) {
-            if (passenger instanceof ItemDisplay display && display.getPersistentDataContainer().has(displayKey, PersistentDataType.STRING)) {
-                display.remove();
-            }
-        }
+        removeArmorDisplay(bee);
         if (profile.armor.isBlank()) return;
-        Material material = Material.matchMaterial(profile.armor);
-        if (material == null) return;
+        Material material = Material.matchMaterial(profile.armor); if (material == null) return;
         ItemDisplay display = bee.getWorld().spawn(bee.getLocation(), ItemDisplay.class, entity -> {
-            entity.setItemStack(new ItemStack(material));
-            entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
-            entity.setPersistent(true);
-            entity.getPersistentDataContainer().set(displayKey, PersistentDataType.STRING, bee.getUniqueId().toString());
+            entity.setItemStack(new ItemStack(material)); entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
+            entity.setPersistent(true); entity.getPersistentDataContainer().set(displayKey, PersistentDataType.STRING, bee.getUniqueId().toString());
         });
         bee.addPassenger(display);
     }
 
-    private boolean isHorseArmor(Material material) {
-        return material.name().endsWith("_HORSE_ARMOR");
-    }
-
     private void openMainMenu(Player player, int requestedPage) {
-        List<UUID> owned = profiles.entrySet().stream()
-                .filter(e -> e.getValue().owner.equals(player.getUniqueId()))
-                .map(Map.Entry::getKey)
-                .sorted(Comparator.comparing(UUID::toString))
-                .toList();
-        int maxPage = Math.max(0, (owned.size() - 1) / 36);
-        int page = Math.max(0, Math.min(requestedPage, maxPage));
+        List<UUID> owned = profiles.entrySet().stream().filter(e -> e.getValue().owner.equals(player.getUniqueId()))
+                .map(Map.Entry::getKey).sorted(Comparator.comparing(UUID::toString)).toList();
+        int maxPage = Math.max(0, (owned.size() - 1) / 36); int page = Math.max(0, Math.min(requestedPage, maxPage));
         MenuHolder holder = new MenuHolder(false, page, null);
-        Inventory inventory = Bukkit.createInventory(holder, 54, "§6BeeKingdom §8| §fМои пчёлы");
-        holder.inventory = inventory;
+        Inventory inv = Bukkit.createInventory(holder, 54, "§6✦ BeeKingdom §8| §fКоролевство пчёл"); holder.inventory = inv;
+        ItemStack filler = namedItem(Material.GRAY_STAINED_GLASS_PANE, "§8 ", List.of());
+        for (int i = 0; i < 54; i++) inv.setItem(i, filler);
         int start = page * 36;
         for (int i = start; i < Math.min(start + 36, owned.size()); i++) {
-            UUID id = owned.get(i);
-            BeeProfile profile = profiles.get(id);
-            Bee bee = loadedBees.get(id);
-            ItemStack icon = new ItemStack(Material.HONEYCOMB);
-            ItemMeta meta = icon.getItemMeta();
-            meta.setDisplayName(ChatColor.YELLOW + "Пчела " + (i + 1));
-            meta.setLore(List.of(ChatColor.GRAY + "Режим: " + profile.mode.title(),
-                    ChatColor.GRAY + "Статус: " + (bee != null && bee.isValid() ? ChatColor.GREEN + "Загружена" : ChatColor.RED + "Не загружена"),
-                    ChatColor.GRAY + "Броня: " + (profile.armor.isBlank() ? "нет" : profile.armor),
-                    ChatColor.YELLOW + "Нажми, чтобы управлять"));
-            icon.setItemMeta(meta);
-            int slot = i - start;
-            inventory.setItem(slot, icon);
-            holder.entries.add(id);
+            UUID id = owned.get(i); BeeProfile p = profiles.get(id); Bee bee = loadedBees.get(id);
+            boolean loaded = bee != null && bee.isValid() && !bee.isDead();
+            List<String> lore = List.of("§7Владелец: §fты", "§7Режим: §f" + p.mode.title,
+                    "§7Статус: " + (loaded ? "§aВ мире" : "§eЧанк не загружен"),
+                    "§7Экипировка: §f" + (p.armor.isBlank() ? "нет" : friendlyArmor(p.armor)), "", "§eНажми, чтобы открыть настройки");
+            inv.setItem(i - start, namedItem(loaded ? Material.HONEYCOMB : Material.HONEY_BOTTLE,
+                    "§6Пчела №" + (i + 1), lore)); holder.entries.add(id);
         }
-        inventory.setItem(45, armyModeItem(player.getUniqueId(), Material.FEATHER, "§aСледовать за мной", Mode.FOLLOW));
-        inventory.setItem(46, armyModeItem(player.getUniqueId(), Material.OAK_SAPLING, "§eСвободный полёт", Mode.STAY));
-        inventory.setItem(47, armyModeItem(player.getUniqueId(), Material.TARGET, "§cВ атаку: выбранная цель", Mode.TARGET));
-        inventory.setItem(48, armyModeItem(player.getUniqueId(), Material.WHITE_WOOL, "§bМирный режим", Mode.PEACEFUL));
-        inventory.setItem(49, armyModeItem(player.getUniqueId(), Material.BLAZE_POWDER, "§4Я конченный, бегите!", Mode.BERSERK));
-        if (page > 0) inventory.setItem(51, menuItem(Material.ARROW, "§fПредыдущая страница"));
-        inventory.setItem(52, menuItem(Material.PAPER, "§eСтраница " + (page + 1) + "/" + (maxPage + 1), "§7Всего пчёл: " + owned.size()));
-        if (page < maxPage) inventory.setItem(53, menuItem(Material.ARROW, "§fСледующая страница"));
-        player.openInventory(inventory);
+        inv.setItem(45, armyModeItem(player.getUniqueId(), Material.FEATHER, "§aСледовать за мной", Mode.FOLLOW));
+        inv.setItem(46, armyModeItem(player.getUniqueId(), Material.OAK_SAPLING, "§eСвободный полёт", Mode.STAY));
+        inv.setItem(47, armyModeItem(player.getUniqueId(), Material.TARGET, "§cВыбрать цель", Mode.TARGET));
+        inv.setItem(48, armyModeItem(player.getUniqueId(), Material.WHITE_WOOL, "§bМирный режим", Mode.PEACEFUL));
+        inv.setItem(49, armyModeItem(player.getUniqueId(), Material.BLAZE_POWDER, "§6Защита территории", Mode.BERSERK));
+        if (page > 0) inv.setItem(51, namedItem(Material.ARROW, "§f← Назад", List.of("§7Предыдущая страница")));
+        inv.setItem(52, namedItem(Material.MAP, "§eСтраница " + (page + 1) + "/" + (maxPage + 1), List.of("§7Всего пчёл: " + owned.size(), "§7Нажми на пчелу для настроек")));
+        if (page < maxPage) inv.setItem(53, namedItem(Material.ARROW, "§fВперёд →", List.of("§7Следующая страница")));
+        player.openInventory(inv);
     }
 
     private void openBeeMenu(Player player, UUID beeId) {
-        BeeProfile profile = profiles.get(beeId);
-        if (profile == null || !profile.owner.equals(player.getUniqueId())) return;
+        BeeProfile p = profiles.get(beeId); if (p == null || !p.owner.equals(player.getUniqueId())) return;
+        Bee bee = loadedBees.get(beeId); boolean loaded = bee != null && bee.isValid() && !bee.isDead();
         MenuHolder holder = new MenuHolder(true, 0, beeId);
-        Inventory inventory = Bukkit.createInventory(holder, 45, "§6BeeKingdom §8| §fПчела");
-        holder.inventory = inventory;
-        inventory.setItem(10, modeItem(Material.FEATHER, "§aСледовать за игроком", Mode.FOLLOW, profile));
-        inventory.setItem(12, modeItem(Material.OAK_SAPLING, "§eСвободный полёт", Mode.STAY, profile));
-        inventory.setItem(14, modeItem(Material.TARGET, "§cВ атаку", Mode.TARGET, profile, "§7Нажми и введи ник онлайн-игрока"));
-        inventory.setItem(16, modeItem(Material.WHITE_WOOL, "§bМирный режим", Mode.PEACEFUL, profile));
-        inventory.setItem(28, modeItem(Material.BLAZE_POWDER, "§4Я конченный, бегите!", Mode.BERSERK, profile));
-        List<String> armorLore = new ArrayList<>();
-        armorLore.add("§7Только конская броня");
-        armorLore.add(profile.armor.isBlank() ? "§cСейчас без брони" : "§aНадето: " + profile.armor);
-        armorLore.add("§eПоложи броню на курсор и нажми");
-        armorLore.add("§7Повторный клик без предмета снимет броню");
-        inventory.setItem(31, namedItem(Material.DIAMOND_HORSE_ARMOR, "§bЭкипировка пчелы", armorLore));
-        inventory.setItem(40, menuItem(Material.ARROW, "§fНазад к списку пчёл"));
-        player.openInventory(inventory);
+        Inventory inv = Bukkit.createInventory(holder, 54, "§6✦ BeeKingdom §8| §fНастройки пчелы"); holder.inventory = inv;
+        ItemStack filler = namedItem(Material.GRAY_STAINED_GLASS_PANE, "§8 ", List.of());
+        for (int i = 0; i < 54; i++) inv.setItem(i, filler);
+        inv.setItem(4, namedItem(Material.BEEHIVE, "§6Информация о пчеле", List.of("§7Статус: " + (loaded ? "§aЗагружена" : "§eЧанк выгружен"), "§7Текущий режим: §f" + p.mode.title)));
+        inv.setItem(10, modeItem(Material.FEATHER, "§aСледовать за игроком", Mode.FOLLOW, p));
+        inv.setItem(12, modeItem(Material.OAK_SAPLING, "§eСвободный полёт", Mode.STAY, p));
+        inv.setItem(14, modeItem(Material.TARGET, "§cАтака выбранной цели", Mode.TARGET, p, "§7Нажми и введи ник игрока"));
+        inv.setItem(16, modeItem(Material.WHITE_WOOL, "§bМирный режим", Mode.PEACEFUL, p));
+        inv.setItem(28, modeItem(Material.BLAZE_POWDER, "§6Защита территории", Mode.BERSERK, p));
+        inv.setItem(31, namedItem(p.armor.isBlank() ? Material.LEATHER_HORSE_ARMOR : safeMaterial(p.armor, Material.DIAMOND_HORSE_ARMOR),
+                "§bЭкипировка пчелы", List.of("§7Разрешена конская броня", p.armor.isBlank() ? "§cСейчас без брони" : "§aНадето: " + friendlyArmor(p.armor),
+                        "", "§eВозьми броню на курсор и нажми сюда", "§7Нажми пустым курсором, чтобы снять")));
+        inv.setItem(34, namedItem(Material.LEAD, "§cОтпустить пчелу", List.of("§7Удалит её из твоего списка", "§7Пчела станет обычной дикой пчелой", "", "§cНажми, чтобы отпустить")));
+        inv.setItem(49, namedItem(Material.ARROW, "§f← Назад к улью", List.of("§7Вернуться к списку пчёл")));
+        player.openInventory(inv);
     }
 
+    private Material safeMaterial(String name, Material fallback) { Material m = Material.matchMaterial(name); return m == null ? fallback : m; }
+    private String friendlyArmor(String name) { return name.toLowerCase().replace('_', ' '); }
     private ItemStack armyModeItem(UUID owner, Material material, String name, Mode mode) {
-        List<BeeProfile> owned = profiles.values().stream().filter(p -> p.owner.equals(owner)).toList();
-        boolean active = !owned.isEmpty() && owned.stream().allMatch(p -> p.mode == mode);
-        return namedItem(material, name, List.of(active ? "§aON" : "§cOFF", "§7Нажми, чтобы применить ко всей армии"));
+        List<BeeProfile> list = profiles.values().stream().filter(p -> p.owner.equals(owner)).toList();
+        boolean active = !list.isEmpty() && list.stream().allMatch(p -> p.mode == mode);
+        return namedItem(material, name, List.of(active ? "§aАктивно у всей армии" : "§7Нажми, чтобы применить ко всем", "§7Пчёл: " + list.size()));
     }
-
-    private ItemStack modeItem(Material material, String name, Mode mode, BeeProfile profile, String... extra) {
-        List<String> lore = new ArrayList<>();
-        lore.add(profile.mode == mode ? "§aON" : "§cOFF");
-        lore.add("§7Нажми, чтобы включить этот режим");
-        if (mode == Mode.TARGET && !profile.targetName.isBlank()) lore.add("§7Цель: " + profile.targetName);
-        lore.addAll(List.of(extra));
-        return namedItem(material, name, lore);
+    private ItemStack modeItem(Material material, String name, Mode mode, BeeProfile p, String... extra) {
+        List<String> lore = new ArrayList<>(); lore.add(p.mode == mode ? "§a● Активен" : "§7○ Не выбран");
+        lore.add("§7Нажми, чтобы переключить режим"); if (mode == Mode.TARGET && !p.targetName.isBlank()) lore.add("§7Цель: §f" + p.targetName);
+        lore.addAll(List.of(extra)); return namedItem(material, name, lore);
     }
-
-    private ItemStack menuItem(Material material, String name, String... lore) {
-        return namedItem(material, name, List.of(lore));
-    }
-
     private ItemStack namedItem(Material material, String name, List<String> lore) {
-        ItemStack item = new ItemStack(material);
-        ItemMeta meta = item.getItemMeta();
-        meta.setDisplayName(name);
-        meta.setLore(lore);
-        item.setItemMeta(meta);
-        return item;
+        ItemStack item = new ItemStack(material); ItemMeta meta = item.getItemMeta(); meta.setDisplayName(name); meta.setLore(lore); item.setItemMeta(meta); return item;
     }
 
     private void loadProfiles() {
         profiles.clear();
-        if (!getConfig().isConfigurationSection("bees")) return;
-        for (String key : getConfig().getConfigurationSection("bees").getKeys(false)) {
-            try {
-                UUID beeId = UUID.fromString(key);
-                String ownerText = getConfig().getString("bees." + key + ".owner", "");
-                BeeProfile profile = new BeeProfile(UUID.fromString(ownerText));
-                try { profile.mode = Mode.valueOf(getConfig().getString("bees." + key + ".mode", "FOLLOW")); }
-                catch (IllegalArgumentException ignored) { profile.mode = Mode.FOLLOW; }
-                profile.targetName = getConfig().getString("bees." + key + ".target", "");
-                profile.armor = getConfig().getString("bees." + key + ".armor", "");
-                profiles.put(beeId, profile);
-            } catch (IllegalArgumentException ignored) {
-                getLogger().warning("Пропущена некорректная запись пчелы: " + key);
-            }
+        releasedBees.clear();
+        for (String value : getConfig().getStringList("released-bees")) {
+            try { releasedBees.add(UUID.fromString(value)); } catch (IllegalArgumentException ignored) { }
         }
+        if (!getConfig().isConfigurationSection("bees")) return;
+        for (String key : getConfig().getConfigurationSection("bees").getKeys(false)) try {
+            UUID id = UUID.fromString(key); String owner = getConfig().getString("bees." + key + ".owner", "");
+            BeeProfile p = new BeeProfile(UUID.fromString(owner));
+            try { p.mode = Mode.valueOf(getConfig().getString("bees." + key + ".mode", "FOLLOW")); } catch (IllegalArgumentException ignored) { p.mode = Mode.FOLLOW; }
+            p.targetName = getConfig().getString("bees." + key + ".target", ""); p.armor = getConfig().getString("bees." + key + ".armor", "");
+            p.world = getConfig().getString("bees." + key + ".world", ""); p.chunkX = getConfig().getInt("bees." + key + ".chunk-x");
+            p.chunkZ = getConfig().getInt("bees." + key + ".chunk-z"); p.hasLocation = !p.world.isBlank() && getConfig().contains("bees." + key + ".chunk-x");
+            profiles.put(id, p);
+        } catch (IllegalArgumentException ignored) { getLogger().warning("Пропущена некорректная запись пчелы: " + key); }
     }
-
     private void saveProfiles() {
         getConfig().set("bees", null);
+        getConfig().set("released-bees", releasedBees.stream().map(UUID::toString).toList());
         for (Map.Entry<UUID, BeeProfile> entry : profiles.entrySet()) {
-            String path = "bees." + entry.getKey();
-            BeeProfile profile = entry.getValue();
-            getConfig().set(path + ".owner", profile.owner.toString());
-            getConfig().set(path + ".mode", profile.mode.name());
-            getConfig().set(path + ".target", profile.targetName);
-            getConfig().set(path + ".armor", profile.armor);
+            String path = "bees." + entry.getKey(); BeeProfile p = entry.getValue();
+            getConfig().set(path + ".owner", p.owner.toString()); getConfig().set(path + ".mode", p.mode.name());
+            getConfig().set(path + ".target", p.targetName); getConfig().set(path + ".armor", p.armor);
+            if (p.hasLocation) { getConfig().set(path + ".world", p.world); getConfig().set(path + ".chunk-x", p.chunkX); getConfig().set(path + ".chunk-z", p.chunkZ); }
         }
         saveConfig();
     }
-
     private String valueOrEmpty(String value) { return value == null ? "" : value; }
 
-    @Override
-    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!(sender instanceof Player player)) {
-            sender.sendMessage("Эта команда доступна только игроку.");
-            return true;
-        }
-        if (!player.hasPermission("beekdom.use")) {
-            player.sendMessage(ChatColor.RED + "У тебя нет разрешения beekdom.use.");
-            return true;
-        }
-        openMainMenu(player, 0);
-        return true;
+    @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!(sender instanceof Player player)) { sender.sendMessage("Эта команда доступна только игроку."); return true; }
+        if (!player.hasPermission("beekdom.use")) { player.sendMessage(ChatColor.RED + "У тебя нет разрешения beekdom.use."); return true; }
+        openMainMenu(player, 0); return true;
     }
 }
