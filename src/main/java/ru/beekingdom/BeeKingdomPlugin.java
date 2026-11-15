@@ -213,6 +213,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             return;
         }
         if (event.getView().getTitle().contains("Откормленные пчёлы")) {
+            if (raw < holder.entries.size()) { openBeeMenu(player, holder.entries.get(raw)); return; }
             if (raw == 45) { openMainMenu(player, 0); return; }
             if (raw == 51 && holder.page > 0) openFattenedMenu(player, holder.page - 1);
             if (raw == 53) openFattenedMenu(player, holder.page + 1);
