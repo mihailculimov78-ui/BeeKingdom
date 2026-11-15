@@ -1,0 +1,10 @@
+{
+  "pack": {
+    "description": "BeeKingdom 0.3.0 — Bee Armor",
+    "min_format": [
+      97,
+      1
+    ],
+    "max_format": 97
+  }
+}
