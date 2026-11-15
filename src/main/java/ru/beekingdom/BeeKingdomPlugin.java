@@ -195,6 +195,14 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (event.getHand() != EquipmentSlot.HAND || !(event.getRightClicked() instanceof Player target)) return;
         Player rider = event.getPlayer();
         if (!(rider.getVehicle() instanceof Bee bee)) return;
+        if (adminBees.contains(bee.getUniqueId())) {
+            if (!isAdminOwner(bee, rider) || target.getUniqueId().equals(rider.getUniqueId())) return;
+            event.setCancelled(true);
+            ridingAttackTargets.put(bee.getUniqueId(), target);
+            bee.setAware(false);
+            rider.sendMessage(ChatColor.LIGHT_PURPLE + "Шохiдко атакует " + target.getName() + "!");
+            return;
+        }
         BeeProfile profile = profiles.get(bee.getUniqueId());
         if (profile == null || !profile.fattened || !profile.saddled || !profile.owner.equals(rider.getUniqueId())
                 || target.getUniqueId().equals(rider.getUniqueId())) return;
@@ -220,10 +228,12 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             return;
         }
         BeeProfile profile = new BeeProfile(player.getUniqueId());
+        profile.armor = getArmyArmor(player.getUniqueId());
         rememberLocation(profile, bee);
         profiles.put(bee.getUniqueId(), profile);
         loadedBees.put(bee.getUniqueId(), bee);
         writeProfileToBee(bee, profile);
+        if (!profile.armor.isBlank()) applyArmorDisplay(bee, profile);
         applyBeeHealth(bee, true);
         bee.setPersistent(true);
         bee.setRemoveWhenFarAway(false);
@@ -408,6 +418,10 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         else if (raw == 31) {
             ItemStack cursor = event.getCursor();
             if (cursor != null && isHorseArmor(cursor.getType())) {
+                if (profile.armor.equals(getArmyArmor(profile.owner))) {
+                    player.sendMessage(ChatColor.YELLOW + "Эта броня установлена всему отряду. Сними её через меню «Управление отрядом».");
+                    return;
+                }
                 if (!profile.armor.isBlank()) giveArmor(player, profile.armor);
                 profile.armor = cursor.getType().name();
                 if (cursor.getAmount() <= 1) event.setCursor(null);
@@ -415,6 +429,10 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
                 applyArmorDisplay(bee, profile); writeProfileToBee(bee, profile); saveProfiles(); openBeeMenu(player, beeId); return;
             }
             if (!profile.armor.isBlank()) {
+                if (profile.armor.equals(getArmyArmor(profile.owner))) {
+                    player.sendMessage(ChatColor.YELLOW + "Эта броня общая для отряда. Сними её через меню «Управление отрядом».");
+                    return;
+                }
                 giveArmor(player, profile.armor); profile.armor = "";
                 applyArmorDisplay(bee, profile); writeProfileToBee(bee, profile); saveProfiles(); openBeeMenu(player, beeId); return;
             }
@@ -427,6 +445,10 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (!(event.getView().getTopInventory().getHolder() instanceof MenuHolder)) return;
         int top = event.getView().getTopInventory().getSize();
         if (event.getRawSlots().stream().anyMatch(slot -> slot < top)) event.setCancelled(true);
+    }
+
+    private String getArmyArmor(UUID owner) {
+        return valueOrEmpty(getConfig().getString("army-armor." + owner, ""));
     }
 
     private boolean isHorseArmor(Material material) { return material.name().endsWith("_HORSE_ARMOR"); }
@@ -450,12 +472,16 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             // При загрузке этого чанка удалим метки приручения из самой сущности.
             releasedBees.add(beeId);
         }
-        if (!profile.armor.isBlank()) giveArmor(player, profile.armor);
+        if (!profile.armor.isBlank() && !profile.armor.equals(getArmyArmor(profile.owner))) giveArmor(player, profile.armor);
         if (profile.saddled) {
             Map<Integer, ItemStack> leftovers = player.getInventory().addItem(new ItemStack(Material.SADDLE));
             leftovers.values().forEach(item -> player.getWorld().dropItemNaturally(player.getLocation(), item));
         }
         profiles.remove(beeId); loadedBees.remove(beeId);
+        if (profiles.values().stream().noneMatch(p -> p.owner.equals(player.getUniqueId()))) {
+            String shared = getArmyArmor(player.getUniqueId());
+            if (!shared.isBlank()) { giveArmor(player, shared); getConfig().set("army-armor." + player.getUniqueId(), null); }
+        }
         freeFlightDirections.remove(beeId); freeFlightRefresh.remove(beeId);
         ridingAttackTargets.remove(beeId);
         pendingBeeTarget.values().removeIf(id -> id.equals(beeId));
@@ -550,7 +576,15 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     @EventHandler public void onBeeDeath(EntityDeathEvent event) {
         if (!(event.getEntity() instanceof Bee bee)) return;
         BeeProfile profile = profiles.remove(bee.getUniqueId()); if (profile == null) return;
-        if (!profile.armor.isBlank()) { Material armor = Material.matchMaterial(profile.armor); if (armor != null) event.getDrops().add(new ItemStack(armor)); }
+        if (!profile.armor.isBlank() && !profile.armor.equals(getArmyArmor(profile.owner))) {
+            Material armor = Material.matchMaterial(profile.armor); if (armor != null) event.getDrops().add(new ItemStack(armor));
+        }
+        if (profile.armor.equals(getArmyArmor(profile.owner))
+                && profiles.values().stream().noneMatch(p -> p.owner.equals(profile.owner))) {
+            Material armor = Material.matchMaterial(getArmyArmor(profile.owner));
+            if (armor != null) event.getDrops().add(new ItemStack(armor));
+            getConfig().set("army-armor." + profile.owner, null);
+        }
         if (profile.saddled) event.getDrops().add(new ItemStack(Material.SADDLE));
         removeArmorDisplay(bee); loadedBees.remove(bee.getUniqueId());
         freeFlightDirections.remove(bee.getUniqueId()); freeFlightRefresh.remove(bee.getUniqueId());
@@ -773,12 +807,14 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (profile.armor.isBlank()) return;
         Material material = Material.matchMaterial(profile.armor); if (material == null) return;
         ItemDisplay display = bee.getWorld().spawn(bee.getLocation(), ItemDisplay.class, entity -> {
-            entity.setItemStack(new ItemStack(material));
-            entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.HEAD);
+            ItemStack armorItem = new ItemStack(material);
+            armorItem.editMeta(meta -> meta.setItemModel(new NamespacedKey(this, "bee_armor")));
+            entity.setItemStack(armorItem);
+            entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.NONE);
             // Меньший размер и смещение вверх выводят модель снаряжения над спинкой,
             // вместо того чтобы крупный предмет проходил сквозь тело пчелы.
             entity.setTransformation(new Transformation(new Vector3f(0.0f, 0.16f, 0.0f), new Quaternionf(),
-                    new Vector3f(0.48f, 0.48f, 0.48f), new Quaternionf()));
+                    new Vector3f(0.72f, 0.72f, 0.72f), new Quaternionf()));
             entity.setPersistent(true); entity.getPersistentDataContainer().set(displayKey, PersistentDataType.STRING, bee.getUniqueId().toString());
         });
         bee.addPassenger(display);
@@ -883,12 +919,31 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
                     bee.removePassenger(rider);
                     rider = null;
                 } else {
-                    bee.setTarget(null);
                     bee.setAware(false);
                     bee.setGravity(false);
-                    Vector direction = rider.getLocation().getDirection().normalize();
-                bee.setVelocity(direction.multiply(0.72));
-                    bee.setRotation(rider.getLocation().getYaw(), Math.max(-45.0f, Math.min(45.0f, rider.getLocation().getPitch())));
+                    LivingEntity attackTarget = ridingAttackTargets.get(bee.getUniqueId());
+                    if (attackTarget != null && (!attackTarget.isValid() || attackTarget.isDead()
+                            || !attackTarget.getWorld().equals(bee.getWorld())
+                            || (attackTarget instanceof Player targetPlayer && targetPlayer.getUniqueId().equals(rider.getUniqueId())))) {
+                        ridingAttackTargets.remove(bee.getUniqueId());
+                        attackTarget = null;
+                    }
+                    if (attackTarget != null) {
+                        Vector delta = attackTarget.getLocation().toVector().subtract(bee.getLocation().toVector());
+                        if (delta.lengthSquared() <= 2.25) {
+                            attackTarget.damage(1000.0, bee);
+                            ridingAttackTargets.remove(bee.getUniqueId());
+                            bee.setVelocity(new Vector(0, 0.08, 0));
+                            rider.sendMessage(ChatColor.LIGHT_PURPLE + "Шохiдко атаковал цель!");
+                        } else {
+                            bee.setVelocity(delta.normalize().multiply(0.72));
+                            faceVelocity(bee);
+                        }
+                    } else {
+                        Vector direction = rider.getLocation().getDirection().normalize();
+                        bee.setVelocity(direction.multiply(0.72));
+                        bee.setRotation(rider.getLocation().getYaw(), Math.max(-45.0f, Math.min(45.0f, rider.getLocation().getPitch())));
+                    }
                     continue;
                 }
             }
@@ -1026,7 +1081,10 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         ItemStack filler = namedItem(Material.GRAY_STAINED_GLASS_PANE, "§8 ", List.of());
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         long count = profiles.values().stream().filter(p -> p.owner.equals(player.getUniqueId())).count();
-        inv.setItem(11, namedItem(Material.DIAMOND_HORSE_ARMOR, "§bБроня всему отряду", List.of("§7Нужно по одной конской броне", "§7на каждую пчелу: " + count, "§eВозьми нужное количество на курсор")));
+        String sharedArmor = getArmyArmor(player.getUniqueId());
+        inv.setItem(11, namedItem(sharedArmor.isBlank() ? Material.DIAMOND_HORSE_ARMOR : safeMaterial(sharedArmor, Material.DIAMOND_HORSE_ARMOR),
+                "§bБроня всему отряду", List.of(sharedArmor.isBlank() ? "§7Нужна всего ОДНА конская броня" : "§aОбщая броня: " + friendlyArmor(sharedArmor),
+                        "§7Она отобразится на всех " + count + " пчёлах", "§eКлик с бронёй — надеть", "§eКлик пустым курсором — снять")));
         inv.setItem(15, namedItem(Material.POTION, "§dЭффект всему отряду", List.of("§7Нужно ОДНО взрывное зелье", "§7Сила или Скорость для всего отряда", "§eВозьми зелье на курсор")));
         inv.setItem(22, namedItem(Material.ARROW, "§f← Назад", List.of()));
         player.openInventory(inv);
@@ -1083,20 +1141,36 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (army.isEmpty()) { player.sendMessage(ChatColor.RED + "У тебя пока нет приручённых пчёл."); return; }
         ItemStack cursor = event.getCursor();
         if (slot == 11) {
-            if (cursor == null || !isHorseArmor(cursor.getType()) || countArmyItems(player, cursor, item -> isHorseArmor(item.getType()) && item.getType() == cursor.getType()) < army.size()) {
-                player.sendMessage(ChatColor.RED + "Нужно конской брони одного типа: " + army.size() + " шт. (считаются предметы в инвентаре и на курсоре)."); return;
+            String oldShared = getArmyArmor(player.getUniqueId());
+            if (cursor == null || cursor.getType().isAir()) {
+                if (oldShared.isBlank()) { player.sendMessage(ChatColor.YELLOW + "На отряде пока нет общей брони."); return; }
+                for (Map.Entry<UUID, BeeProfile> entry : army) {
+                    BeeProfile p = entry.getValue();
+                    if (p.armor.equals(oldShared)) p.armor = "";
+                    Bee bee = loadedBees.get(entry.getKey());
+                    if (bee != null && bee.isValid()) { applyArmorDisplay(bee, p); writeProfileToBee(bee, p); }
+                }
+                getConfig().set("army-armor." + player.getUniqueId(), null);
+                giveArmor(player, oldShared);
+                saveProfiles(); player.sendMessage(ChatColor.GREEN + "Общая броня снята со всего отряда.");
+                openArmyEquipmentMenu(player); return;
+            }
+            if (!isHorseArmor(cursor.getType())) {
+                player.sendMessage(ChatColor.RED + "Положи на курсор любую конскую броню."); return;
             }
             Material armor = cursor.getType();
             for (Map.Entry<UUID, BeeProfile> entry : army) {
                 BeeProfile p = entry.getValue();
-                if (!p.armor.isBlank()) giveArmor(player, p.armor);
+                if (!p.armor.isBlank() && !p.armor.equals(oldShared)) giveArmor(player, p.armor);
                 p.armor = armor.name();
                 Bee bee = loadedBees.get(entry.getKey());
                 if (bee != null && bee.isValid()) { applyArmorDisplay(bee, p); writeProfileToBee(bee, p); }
             }
+            if (!oldShared.isBlank()) giveArmor(player, oldShared);
+            getConfig().set("army-armor." + player.getUniqueId(), armor.name());
             if (player.getGameMode() != org.bukkit.GameMode.CREATIVE)
-                consumeArmyItems(player, event, item -> item.getType() == armor, army.size());
-            saveProfiles(); player.sendMessage(ChatColor.GREEN + "Броня выдана всем " + army.size() + " пчёлам.");
+                consumeArmyItems(player, event, item -> item.getType() == armor, 1);
+            saveProfiles(); player.sendMessage(ChatColor.GREEN + "Одна конская броня теперь защищает весь отряд из " + army.size() + " пчёл.");
         } else {
             PotionEffectType effect = effectFromPotion(cursor);
             if (effect == null) { player.sendMessage(ChatColor.RED + "Пока доступны только зелья Силы и Скорости."); return; }
