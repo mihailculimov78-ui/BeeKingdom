@@ -225,6 +225,22 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
 
     @EventHandler public void onSaddleOrMount(PlayerInteractEntityEvent event) {
         if (!(event.getRightClicked() instanceof Bee bee) || event.getHand() != EquipmentSlot.HAND) return;
+        Player player = event.getPlayer();
+        if (adminBees.contains(bee.getUniqueId())) {
+            if (!adminPanelUsers.contains(player.getUniqueId())) { player.sendMessage(ChatColor.RED + "Оседлать Шохiдко может только вошедший в админ-панель игрок."); return; }
+            event.setCancelled(true);
+            if (bee.getPassengers().isEmpty()) {
+                bee.addPassenger(player);
+                bee.setAware(false);
+                bee.setGravity(false);
+                player.sendMessage(ChatColor.LIGHT_PURPLE + "Ты оседлал Шохiдко! Смотри в нужную сторону для полёта.");
+            } else if (bee.getPassengers().contains(player)) {
+                bee.removePassenger(player);
+                bee.setGravity(true);
+                player.sendMessage(ChatColor.GRAY + "Ты слез с Шохiдко.");
+            }
+            return;
+        }
         BeeProfile profile = profiles.get(bee.getUniqueId());
         if (profile == null || !profile.owner.equals(event.getPlayer().getUniqueId()) || !profile.fattened) return;
         ItemStack hand = event.getPlayer().getInventory().getItemInMainHand();
@@ -763,6 +779,16 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             Entity entity = Bukkit.getEntity(id);
             if (!(entity instanceof Bee bee) || !bee.isValid() || bee.isDead()) { adminBees.remove(id); continue; }
             if (bee.hasStung()) bee.setHasStung(false);
+            Player rider = bee.getPassengers().stream().filter(passenger -> passenger instanceof Player).map(passenger -> (Player) passenger).findFirst().orElse(null);
+            if (rider != null) {
+                bee.setAware(false);
+                bee.setGravity(false);
+                Vector direction = rider.getLocation().getDirection().normalize();
+                bee.setVelocity(direction.multiply(0.72));
+                bee.setRotation(rider.getLocation().getYaw(), Math.max(-45.0f, Math.min(45.0f, rider.getLocation().getPitch())));
+                continue;
+            }
+            bee.setGravity(true);
             Player target = bee.getWorld().getPlayers().stream().filter(p -> p.getGameMode() != org.bukkit.GameMode.SPECTATOR)
                     .min(Comparator.comparingDouble(p -> p.getLocation().distanceSquared(bee.getLocation()))).orElse(null);
             if (target != null && target.getLocation().distanceSquared(bee.getLocation()) < 1600) bee.setTarget(target);
