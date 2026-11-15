@@ -176,6 +176,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         profiles.put(bee.getUniqueId(), profile);
         loadedBees.put(bee.getUniqueId(), bee);
         writeProfileToBee(bee, profile);
+        applyBeeHealth(bee);
         bee.setPersistent(true);
         bee.setRemoveWhenFarAway(false);
         bee.setCustomName(ChatColor.YELLOW + "Пчела " + player.getName());
@@ -493,6 +494,15 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         rememberLocation(profile, bee); loadedBees.put(id, bee);
         if (!profile.armor.isBlank()) applyArmorDisplay(bee, profile);
         applyBeeScale(bee, profile);
+        applyBeeHealth(bee);
+    }
+
+    private void applyBeeHealth(Bee bee) {
+        var health = bee.getAttribute(Attribute.MAX_HEALTH);
+        if (health == null) return;
+        double maxHealth = Math.max(20.0, getConfig().getDouble("tamed-bee-max-health", 60.0));
+        health.setBaseValue(maxHealth);
+        if (bee.getHealth() < maxHealth) bee.setHealth(maxHealth);
     }
 
     private void rememberLocation(BeeProfile profile, Bee bee) {
