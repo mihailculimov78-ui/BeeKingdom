@@ -8,6 +8,7 @@ import org.bukkit.Material;
 import org.bukkit.Particle;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
+import org.bukkit.Location;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -26,9 +27,11 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
+import org.bukkit.event.entity.PlayerLeashEntityEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.player.PlayerUnleashEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.ChunkUnloadEvent;
@@ -106,7 +109,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private final Set<UUID> adminBees = new HashSet<>();
     private boolean discoParty = false;
 
-    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey, saddledKey, potionEffectKey, sugarFedKey, adminBeeKey;
+    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey, saddledKey, potionEffectKey, sugarFedKey, adminBeeKey, adminOwnerKey, collarLeashKey;
 
     @Override public void onEnable() {
         ownerKey = new NamespacedKey(this, "owner");
@@ -120,6 +123,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         potionEffectKey = new NamespacedKey(this, "potion_effect");
         sugarFedKey = new NamespacedKey(this, "sugar_fed");
         adminBeeKey = new NamespacedKey(this, "admin_boss_bee");
+        adminOwnerKey = new NamespacedKey(this, "admin_boss_owner");
+        collarLeashKey = new NamespacedKey(this, "collar_leash");
         saveDefaultConfig();
         loadProfiles();
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -133,10 +138,15 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
 
     @Override public void onDisable() { saveProfiles(); loadedBees.clear(); }
 
-    private void registerCollarRecipe() {
+    private ItemStack createCollar() {
         ItemStack item = namedItem(Material.LEAD, ChatColor.GOLD + "Ошейник пчеловода",
                 List.of(ChatColor.GRAY + "ПКМ — открыть улей", ChatColor.YELLOW + "BeeKingdom"));
         item.editMeta(meta -> meta.getPersistentDataContainer().set(collarKey, PersistentDataType.STRING, "true"));
+        return item;
+    }
+
+    private void registerCollarRecipe() {
+        ItemStack item = createCollar();
         ShapedRecipe recipe = new ShapedRecipe(new NamespacedKey(this, "bee_collar"), item);
         recipe.shape("LLL", "L L", "LLL");
         recipe.setIngredient('L', Material.LEAD);
@@ -147,6 +157,28 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private boolean isCollar(ItemStack item) {
         return item != null && item.getType() == Material.LEAD && item.hasItemMeta()
                 && item.getItemMeta().getPersistentDataContainer().has(collarKey, PersistentDataType.STRING);
+    }
+
+    @EventHandler public void onCollarLeash(PlayerLeashEntityEvent event) {
+        if (!(event.getEntity() instanceof Bee bee)) return;
+        ItemStack used = event.getHand() == EquipmentSlot.OFF_HAND
+                ? event.getPlayer().getInventory().getItemInOffHand()
+                : event.getPlayer().getInventory().getItemInMainHand();
+        if (isCollar(used)) bee.getPersistentDataContainer().set(collarLeashKey, PersistentDataType.STRING, "true");
+    }
+
+    @EventHandler public void onCollarUnleash(PlayerUnleashEntityEvent event) {
+        if (!(event.getEntity() instanceof Bee bee)) return;
+        PersistentDataContainer data = bee.getPersistentDataContainer();
+        if (!data.has(collarLeashKey, PersistentDataType.STRING)) return;
+        event.setDropLeash(false);
+        data.remove(collarLeashKey);
+        Player player = event.getPlayer();
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (!player.isOnline()) return;
+            Map<Integer, ItemStack> leftovers = player.getInventory().addItem(createCollar());
+            leftovers.values().forEach(item -> player.getWorld().dropItemNaturally(player.getLocation(), item));
+        });
     }
 
     @EventHandler public void onRidingAttackPlayer(PlayerInteractEntityEvent event) {
@@ -166,7 +198,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (!(event.getRightClicked() instanceof Bee bee) || event.getHand() != EquipmentSlot.HAND) return;
         Player player = event.getPlayer();
         ItemStack hand = player.getInventory().getItemInMainHand();
-        if (hand.getType() != Material.POPPY) return;
+        if (adminBees.contains(bee.getUniqueId()) || hand.getType() != Material.POPPY) return;
         if (bee.getPersistentDataContainer().has(ownerKey, PersistentDataType.STRING)) {
             player.sendMessage(ChatColor.RED + "Эта пчела уже приручена."); return;
         }
@@ -227,9 +259,13 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (!(event.getRightClicked() instanceof Bee bee) || event.getHand() != EquipmentSlot.HAND) return;
         Player player = event.getPlayer();
         if (adminBees.contains(bee.getUniqueId())) {
-            if (!adminPanelUsers.contains(player.getUniqueId())) { player.sendMessage(ChatColor.RED + "Оседлать Шохiдко может только вошедший в админ-панель игрок."); return; }
+            if (!isAdminOwner(bee, player)) {
+                player.sendMessage(ChatColor.RED + "Оседлать Шохiдко может только игрок, который его призвал.");
+                return;
+            }
             event.setCancelled(true);
             if (bee.getPassengers().isEmpty()) {
+                bee.setTarget(null);
                 bee.addPassenger(player);
                 bee.setAware(false);
                 bee.setGravity(false);
@@ -237,7 +273,10 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             } else if (bee.getPassengers().contains(player)) {
                 bee.removePassenger(player);
                 bee.setGravity(true);
+                bee.setAware(true);
                 player.sendMessage(ChatColor.GRAY + "Ты слез с Шохiдко.");
+            } else {
+                player.sendMessage(ChatColor.RED + "Шохiдко уже оседлан.");
             }
             return;
         }
@@ -430,7 +469,10 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
 
     @EventHandler public void onBeeTarget(EntityTargetLivingEntityEvent event) {
         if (!(event.getEntity() instanceof Bee bee)) return;
-        if (adminBees.contains(bee.getUniqueId()) && event.getTarget() instanceof Player) return;
+        if (adminBees.contains(bee.getUniqueId())) {
+            if (event.getTarget() instanceof Player player && isAdminOwner(bee, player)) event.setCancelled(true);
+            return;
+        }
         BeeProfile profile = profiles.get(bee.getUniqueId()); if (profile == null) return;
         LivingEntity target = event.getTarget(); if (target == null) return;
         if (target instanceof Player player && player.getUniqueId().equals(profile.owner)) { event.setCancelled(true); return; }
@@ -538,9 +580,16 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     }
 
     @EventHandler public void onAdminBeeDamage(EntityDamageByEntityEvent event) {
-        if (event.getDamager() instanceof Bee bee && adminBees.contains(bee.getUniqueId()) && event.getEntity() instanceof Player) {
-            event.setDamage(1000.0);
+        if (event.getDamager() instanceof Bee bee && adminBees.contains(bee.getUniqueId())
+                && event.getEntity() instanceof Player player) {
+            if (isAdminOwner(bee, player)) event.setCancelled(true);
+            else event.setDamage(1000.0);
         }
+    }
+
+    private boolean isAdminOwner(Bee bee, Player player) {
+        String owner = bee.getPersistentDataContainer().get(adminOwnerKey, PersistentDataType.STRING);
+        return player.getUniqueId().toString().equals(owner);
     }
 
     private void applyBeeHealth(Bee bee) {
@@ -559,6 +608,9 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private void tickBees() {
         tickAdminBees();
         if (discoParty) tickDiscoParty();
+        for (World world : Bukkit.getWorlds()) {
+            for (Entity entity : world.getEntities()) if (entity instanceof Bee bee) keepBeeAwayFromWater(bee);
+        }
         for (Map.Entry<UUID, BeeProfile> entry : profiles.entrySet()) {
             Bee bee = loadedBees.get(entry.getKey()); if (bee == null || !bee.isValid() || bee.isDead()) continue;
             BeeProfile profile = entry.getValue();
@@ -621,6 +673,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
                         .map(e -> (LivingEntity) e).min(Comparator.comparingDouble(e -> e.getLocation().distanceSquared(bee.getLocation()))).orElse(null);
                 bee.setTarget(target);
             }
+            keepBeeAwayFromWater(bee);
             rememberLocation(profile, bee);
         }
     }
@@ -761,6 +814,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         bee.setPersistent(true);
         bee.setRemoveWhenFarAway(false);
         bee.getPersistentDataContainer().set(adminBeeKey, PersistentDataType.STRING, "true");
+        bee.getPersistentDataContainer().set(adminOwnerKey, PersistentDataType.STRING, player.getUniqueId().toString());
         adminBees.add(bee.getUniqueId());
         var maxHealth = bee.getAttribute(Attribute.MAX_HEALTH);
         if (maxHealth != null) { maxHealth.setBaseValue(500.0); bee.setHealth(500.0); }
@@ -781,19 +835,82 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             if (bee.hasStung()) bee.setHasStung(false);
             Player rider = bee.getPassengers().stream().filter(passenger -> passenger instanceof Player).map(passenger -> (Player) passenger).findFirst().orElse(null);
             if (rider != null) {
-                bee.setAware(false);
-                bee.setGravity(false);
-                Vector direction = rider.getLocation().getDirection().normalize();
+                if (!isAdminOwner(bee, rider)) {
+                    bee.removePassenger(rider);
+                    rider = null;
+                } else {
+                    bee.setTarget(null);
+                    bee.setAware(false);
+                    bee.setGravity(false);
+                    Vector direction = rider.getLocation().getDirection().normalize();
                 bee.setVelocity(direction.multiply(0.72));
-                bee.setRotation(rider.getLocation().getYaw(), Math.max(-45.0f, Math.min(45.0f, rider.getLocation().getPitch())));
-                continue;
+                    bee.setRotation(rider.getLocation().getYaw(), Math.max(-45.0f, Math.min(45.0f, rider.getLocation().getPitch())));
+                    continue;
+                }
             }
             bee.setGravity(true);
+            bee.setAware(true);
+            UUID ownerId = getAdminOwnerId(bee);
             Player target = bee.getWorld().getPlayers().stream().filter(p -> p.getGameMode() != org.bukkit.GameMode.SPECTATOR)
+                    .filter(p -> !p.getUniqueId().equals(ownerId))
                     .min(Comparator.comparingDouble(p -> p.getLocation().distanceSquared(bee.getLocation()))).orElse(null);
             if (target != null && target.getLocation().distanceSquared(bee.getLocation()) < 1600) bee.setTarget(target);
             else bee.setTarget(null);
+            keepBeeAwayFromWater(bee);
         }
+    }
+
+    private UUID getAdminOwnerId(Bee bee) {
+        String value = bee.getPersistentDataContainer().get(adminOwnerKey, PersistentDataType.STRING);
+        if (value == null) return null;
+        try { return UUID.fromString(value); } catch (IllegalArgumentException ignored) { return null; }
+    }
+
+    private void keepBeeAwayFromWater(Bee bee) {
+        if (!bee.isValid() || bee.isDead() || bee.getPassengers().stream().anyMatch(passenger -> passenger instanceof Player)) return;
+        Location here = bee.getLocation();
+        if (here.getBlock().getType() == Material.WATER) {
+            Location safe = findDryBeeLocation(bee);
+            if (safe != null) {
+                bee.teleport(safe);
+                bee.setVelocity(new Vector(0.0, 0.18, 0.0));
+            } else {
+                bee.setVelocity(new Vector(0.0, 0.28, 0.0));
+            }
+            return;
+        }
+        Vector away = new Vector(0, 0, 0);
+        for (int dx = -2; dx <= 2; dx++) for (int dy = -1; dy <= 1; dy++) for (int dz = -2; dz <= 2; dz++) {
+            if (dx == 0 && dy == 0 && dz == 0) continue;
+            Location sample = here.clone().add(dx, dy, dz);
+            if (sample.getBlock().getType() != Material.WATER) continue;
+            Vector push = here.toVector().subtract(sample.toVector());
+            push.setY(0);
+            if (push.lengthSquared() > 0.001) away.add(push.normalize().multiply(1.0 / (1.0 + Math.abs(dx) + Math.abs(dz))));
+        }
+        if (away.lengthSquared() > 0.001) {
+            Vector velocity = bee.getVelocity().multiply(0.25).add(away.normalize().multiply(0.30));
+            velocity.setY(Math.max(0.10, velocity.getY()));
+            bee.setVelocity(velocity);
+        }
+    }
+
+    private Location findDryBeeLocation(Bee bee) {
+        Location base = bee.getLocation();
+        for (int radius = 1; radius <= 6; radius++) {
+            for (int dy = 1; dy <= 5; dy++) {
+                for (int dx = -radius; dx <= radius; dx++) for (int dz = -radius; dz <= radius; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != radius) continue;
+                    Location candidate = base.clone().add(dx, dy, dz);
+                    if (candidate.getBlock().isPassable() && candidate.getBlock().getType() != Material.WATER
+                            && candidate.clone().add(0, 1, 0).getBlock().isPassable()
+                            && candidate.clone().add(0, 1, 0).getBlock().getType() != Material.WATER) {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     private void restoreDiscoBees() {
