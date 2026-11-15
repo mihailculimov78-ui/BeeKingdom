@@ -299,7 +299,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             event.getPlayer().sendMessage(ChatColor.GREEN + "Седло надето. Теперь можно оседлать пчелу.");
         } else if (profile.saddled && hand.getType() != Material.SUGAR) {
             event.setCancelled(true);
-            if (bee.getPassengers().isEmpty()) {
+            if (bee.getPassengers().stream().noneMatch(passenger -> passenger instanceof Player)) {
                 bee.addPassenger(event.getPlayer());
                 event.getPlayer().sendMessage(ChatColor.GREEN + "Ты оседлал большую пчелу. Смотри в нужную сторону для управления.");
             }
@@ -348,12 +348,16 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (!holder.detail) {
             if (raw < holder.entries.size()) { openBeeMenu(player, holder.entries.get(raw)); return; }
             if (raw == 44) { openArmyEquipmentMenu(player); return; }
-            if (raw == 43) { waitingForAdminCode.add(player.getUniqueId()); player.closeInventory(); player.sendMessage(ChatColor.GOLD + "Введи код доступа к админ-панели в чат (или «отмена»)."); return; }
+            if (raw == 43) {
+                waitingForTarget.remove(player.getUniqueId()); waitingForArmyTarget.remove(player.getUniqueId()); pendingBeeTarget.remove(player.getUniqueId());
+                waitingForAdminCode.add(player.getUniqueId()); player.closeInventory(); player.sendMessage(ChatColor.GOLD + "Введи код доступа к админ-панели в чат (или «отмена»)."); return;
+            }
             if (raw == 50) { openFattenedMenu(player, 0); return; }
             if (raw >= 45 && raw <= 49) {
                 Mode[] modes = {Mode.FOLLOW, Mode.STAY, Mode.TARGET, Mode.PEACEFUL, Mode.BERSERK};
                 Mode mode = modes[raw - 45];
                 if (mode == Mode.TARGET) {
+                    waitingForTarget.remove(player.getUniqueId()); pendingBeeTarget.remove(player.getUniqueId());
                     waitingForArmyTarget.add(player.getUniqueId()); player.closeInventory();
                     player.sendMessage(ChatColor.YELLOW + "Напиши в чат ник игрока. Напиши «отмена», чтобы отменить.");
                 } else { setArmyMode(player.getUniqueId(), mode, ""); openMainMenu(player, holder.page); }
@@ -386,6 +390,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (raw == 10) setMode(player, beeId, Mode.FOLLOW, "");
         else if (raw == 12) setMode(player, beeId, Mode.STAY, "");
         else if (raw == 14) {
+            waitingForArmyTarget.remove(player.getUniqueId());
             pendingBeeTarget.put(player.getUniqueId(), beeId); waitingForTarget.add(player.getUniqueId()); player.closeInventory();
             player.sendMessage(ChatColor.YELLOW + "Напиши в чат ник онлайн-игрока. Напиши «отмена», чтобы отменить."); return;
         } else if (raw == 16) setMode(player, beeId, Mode.PEACEFUL, "");
@@ -428,6 +433,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         Bee bee = loadedBees.get(beeId);
         if (bee != null && bee.isValid()) {
             removeArmorDisplay(bee);
+            bee.eject();
             clearBeeKingdomData(bee);
             releasedBees.remove(beeId);
         } else {
@@ -462,6 +468,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             Player player = Bukkit.getPlayer(playerId);
             if (player == null) { pendingBeeTarget.remove(playerId); return; }
             if (adminCode) {
+                pendingBeeTarget.remove(playerId);
                 waitingForAdminCode.remove(playerId);
                 if (input.equals("67148867")) { adminPanelUsers.add(playerId); player.sendMessage(ChatColor.GREEN + "Код принят. Добро пожаловать в админ-панель."); openAdminMenu(player); }
                 else if (input.equalsIgnoreCase("отмена") || input.equalsIgnoreCase("cancel")) player.sendMessage(ChatColor.GRAY + "Вход отменён.");
@@ -472,8 +479,16 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
                 pendingBeeTarget.remove(playerId); player.sendMessage(ChatColor.GRAY + "Выбор цели отменён."); return;
             }
             Player target = Bukkit.getPlayerExact(input);
-            if (target == null) { player.sendMessage(ChatColor.RED + "Игрок с таким ником не найден онлайн."); return; }
-            if (army) { setArmyMode(playerId, Mode.TARGET, target.getName()); player.sendMessage(ChatColor.GREEN + "Цель армии: " + target.getName()); openMainMenu(player, 0); }
+            if (target == null) {
+                if (army) waitingForArmyTarget.add(playerId);
+                else if (single) waitingForTarget.add(playerId);
+                player.sendMessage(ChatColor.RED + "Игрок с таким ником не найден онлайн. Попробуй ещё раз или напиши «отмена».");
+                return;
+            }
+            if (army) {
+                pendingBeeTarget.remove(playerId);
+                setArmyMode(playerId, Mode.TARGET, target.getName()); player.sendMessage(ChatColor.GREEN + "Цель армии: " + target.getName()); openMainMenu(player, 0);
+            }
             else {
                 UUID beeId = pendingBeeTarget.remove(playerId);
                 if (beeId == null || !profiles.containsKey(beeId)) { player.sendMessage(ChatColor.RED + "Не удалось найти выбранную пчелу."); return; }
@@ -658,7 +673,11 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             Player owner = Bukkit.getPlayer(profile.owner);
             if (profile.mode == Mode.FOLLOW) {
                 bee.setAware(false); bee.setTarget(null);
-                if (owner == null || !owner.isOnline() || !owner.getWorld().equals(bee.getWorld())) continue;
+                if (owner == null || !owner.isOnline() || !owner.getWorld().equals(bee.getWorld())) {
+                    keepBeeAwayFromWater(bee);
+                    rememberLocation(profile, bee);
+                    continue;
+                }
                 double distance = owner.getLocation().distance(bee.getLocation());
                 if (distance > 28) bee.teleport(owner.getLocation().clone().add(1.0, 1.0, 0));
                 else if (distance > 2.8) {
