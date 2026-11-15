@@ -1,5 +1,5 @@
 name: BeeKingdom
-version: 0.2.0
+version: 0.3.0
 main: ru.beekingdom.BeeKingdomPlugin
 api-version: '26.3'
 author: BeeKingdom
