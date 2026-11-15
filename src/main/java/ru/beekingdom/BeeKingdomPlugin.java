@@ -74,6 +74,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         int chunkZ;
         boolean hasLocation;
         boolean fattened;
+        int sugarFed;
         boolean saddled;
         String potionEffect = "";
         BeeProfile(UUID owner) { this.owner = owner; }
@@ -100,7 +101,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private final Map<UUID, Integer> freeFlightRefresh = new HashMap<>();
     private final Map<UUID, LivingEntity> ridingAttackTargets = new HashMap<>();
 
-    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey, saddledKey, potionEffectKey;
+    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey, saddledKey, potionEffectKey, sugarFedKey;
 
     @Override public void onEnable() {
         ownerKey = new NamespacedKey(this, "owner");
@@ -112,6 +113,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         fattenedKey = new NamespacedKey(this, "fattened");
         saddledKey = new NamespacedKey(this, "saddled");
         potionEffectKey = new NamespacedKey(this, "potion_effect");
+        sugarFedKey = new NamespacedKey(this, "sugar_fed");
         saveDefaultConfig();
         loadProfiles();
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -141,20 +143,17 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
                 && item.getItemMeta().getPersistentDataContainer().has(collarKey, PersistentDataType.STRING);
     }
 
-    @EventHandler public void onRidingAttack(PlayerInteractEvent event) {
-        if (event.getHand() != EquipmentSlot.HAND || (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK)) return;
+    @EventHandler public void onRidingAttackPlayer(PlayerInteractEntityEvent event) {
+        if (event.getHand() != EquipmentSlot.HAND || !(event.getRightClicked() instanceof Player target)) return;
         Player rider = event.getPlayer();
         if (!(rider.getVehicle() instanceof Bee bee)) return;
         BeeProfile profile = profiles.get(bee.getUniqueId());
-        if (profile == null || !profile.fattened || !profile.saddled || !profile.owner.equals(rider.getUniqueId())) return;
-        Player target = bee.getWorld().getNearbyEntities(bee.getLocation(), 24, 16, 24).stream()
-                .filter(entity -> entity instanceof Player).map(entity -> (Player) entity)
-                .filter(candidate -> !candidate.getUniqueId().equals(rider.getUniqueId()))
-                .min(Comparator.comparingDouble(candidate -> candidate.getLocation().distanceSquared(bee.getLocation()))).orElse(null);
-        if (target != null) {
-            ridingAttackTargets.put(bee.getUniqueId(), target); bee.setTarget(target);
-            rider.sendMessage(ChatColor.YELLOW + "Пчела летит к ближайшему игроку: " + target.getName());
-        } else rider.sendMessage(ChatColor.RED + "Рядом нет других игроков.");
+        if (profile == null || !profile.fattened || !profile.saddled || !profile.owner.equals(rider.getUniqueId())
+                || target.getUniqueId().equals(rider.getUniqueId())) return;
+        event.setCancelled(true);
+        ridingAttackTargets.put(bee.getUniqueId(), target);
+        bee.setAware(false);
+        rider.sendMessage(ChatColor.YELLOW + "Пчела атакует " + target.getName() + " один раз.");
     }
 
     @EventHandler public void onTame(PlayerInteractEntityEvent event) {
@@ -192,17 +191,18 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         ItemStack hand = event.getPlayer().getInventory().getItemInMainHand();
         if (hand.getType() != Material.SUGAR) return;
         event.setCancelled(true);
-        if (hand.getAmount() < 64) {
-            event.getPlayer().sendMessage(ChatColor.RED + "Для откорма нужен полный стак сахара — 64 штуки.");
-            return;
+        if (event.getPlayer().getGameMode() != org.bukkit.GameMode.CREATIVE) hand.setAmount(hand.getAmount() - 1);
+        profile.sugarFed = Math.min(64, profile.sugarFed + 1);
+        if (profile.sugarFed >= 64) {
+            profile.fattened = true;
+            applyBeeScale(bee, profile);
+            applyStoredPotionEffect(bee, profile);
+            event.getPlayer().sendMessage(ChatColor.GREEN + "Пчела съела 64 сахара и выросла!");
+        } else {
+            event.getPlayer().sendMessage(ChatColor.YELLOW + "Сахар съеден: " + profile.sugarFed + "/64. Продолжай кормить по одной штуке.");
         }
-        if (event.getPlayer().getGameMode() != org.bukkit.GameMode.CREATIVE) hand.setAmount(hand.getAmount() - 64);
-        profile.fattened = true;
-        applyBeeScale(bee, profile);
-        applyStoredPotionEffect(bee, profile);
         writeProfileToBee(bee, profile);
         saveProfiles();
-        event.getPlayer().sendMessage(ChatColor.GREEN + "Пчела откормлена! Она стала крупнее.");
     }
 
     private void applyStoredPotionEffect(Bee bee, BeeProfile profile) {
@@ -213,7 +213,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
 
     private void applyBeeScale(Bee bee, BeeProfile profile) {
         var scale = bee.getAttribute(Attribute.SCALE);
-        if (scale != null) scale.setBaseValue(profile.fattened ? 1.65 : 1.0);
+        if (scale != null) scale.setBaseValue(profile.fattened ? 1.85 : 1.0);
     }
 
     @EventHandler public void onSaddleOrMount(PlayerInteractEntityEvent event) {
@@ -486,6 +486,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             profile.fattened = Boolean.parseBoolean(valueOrEmpty(bee.getPersistentDataContainer().get(fattenedKey, PersistentDataType.STRING)));
             profile.saddled = Boolean.parseBoolean(valueOrEmpty(bee.getPersistentDataContainer().get(saddledKey, PersistentDataType.STRING)));
             profile.potionEffect = valueOrEmpty(bee.getPersistentDataContainer().get(potionEffectKey, PersistentDataType.STRING));
+            Integer fed = bee.getPersistentDataContainer().get(sugarFedKey, PersistentDataType.INTEGER);
+            profile.sugarFed = fed == null ? 0 : Math.max(0, Math.min(64, fed));
             profiles.put(id, profile);
         }
         rememberLocation(profile, bee); loadedBees.put(id, bee);
@@ -506,19 +508,31 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             if (bee.hasStung()) bee.setHasStung(false);
             Player rider = bee.getPassengers().stream().filter(passenger -> passenger instanceof Player).map(passenger -> (Player) passenger).findFirst().orElse(null);
             if (rider != null && profile.fattened && profile.saddled) {
-                bee.setAware(true);
+                bee.setAware(false);
+                bee.setGravity(false);
                 LivingEntity attackTarget = ridingAttackTargets.get(bee.getUniqueId());
                 if (attackTarget != null && (!attackTarget.isValid() || attackTarget.isDead() || !attackTarget.getWorld().equals(bee.getWorld()))) {
                     ridingAttackTargets.remove(bee.getUniqueId()); attackTarget = null;
                 }
-                Vector direction = attackTarget != null
-                        ? attackTarget.getLocation().toVector().subtract(bee.getLocation().toVector()).normalize()
-                        : rider.getLocation().getDirection().normalize();
-                bee.setVelocity(direction.multiply(attackTarget != null ? 0.42 : 0.30));
-                faceVelocity(bee);
-                if (attackTarget != null) bee.setTarget(attackTarget);
+                if (attackTarget != null) {
+                    Vector delta = attackTarget.getLocation().toVector().subtract(bee.getLocation().toVector());
+                    if (delta.lengthSquared() <= 2.25) {
+                        attackTarget.damage(4.0, bee);
+                        ridingAttackTargets.remove(bee.getUniqueId());
+                        bee.setVelocity(new Vector(0, 0.08, 0));
+                    } else {
+                        bee.setVelocity(delta.normalize().multiply(0.48));
+                        faceVelocity(bee);
+                    }
+                } else {
+                    Vector direction = rider.getLocation().getDirection().normalize();
+                    bee.setVelocity(direction.multiply(0.38));
+                    bee.setRotation(rider.getLocation().getYaw(), Math.max(-35.0f, Math.min(35.0f, rider.getLocation().getPitch())));
+                }
                 continue;
             }
+            bee.setGravity(true);
+            ridingAttackTargets.remove(bee.getUniqueId());
             Player owner = Bukkit.getPlayer(profile.owner);
             if (profile.mode == Mode.FOLLOW) {
                 bee.setAware(false); bee.setTarget(null);
@@ -591,6 +605,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         pdc.set(fattenedKey, PersistentDataType.STRING, Boolean.toString(profile.fattened));
         pdc.set(saddledKey, PersistentDataType.STRING, Boolean.toString(profile.saddled));
         pdc.set(potionEffectKey, PersistentDataType.STRING, profile.potionEffect);
+        pdc.set(sugarFedKey, PersistentDataType.INTEGER, profile.sugarFed);
     }
 
     private void removeArmorDisplay(Bee bee) {
@@ -675,7 +690,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         long count = profiles.values().stream().filter(p -> p.owner.equals(player.getUniqueId())).count();
         inv.setItem(11, namedItem(Material.DIAMOND_HORSE_ARMOR, "§bБроня всему отряду", List.of("§7Нужно по одной конской броне", "§7на каждую пчелу: " + count, "§eВозьми нужное количество на курсор")));
-        inv.setItem(15, namedItem(Material.POTION, "§dЭффект всему отряду", List.of("§7Одно зелье на каждую пчелу: " + count, "§7Поддерживаются Сила и Скорость", "§eВозьми зелья на курсор")));
+        inv.setItem(15, namedItem(Material.POTION, "§dЭффект всему отряду", List.of("§7Нужно ОДНО взрывное зелье", "§7Сила или Скорость для всего отряда", "§eВозьми зелье на курсор")));
         inv.setItem(22, namedItem(Material.ARROW, "§f← Назад", List.of()));
         player.openInventory(inv);
     }
@@ -707,10 +722,10 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     }
 
     private PotionEffectType effectFromPotion(ItemStack item) {
-        if (item == null || item.getType() != Material.POTION || !(item.getItemMeta() instanceof PotionMeta meta)) return null;
+        if (item == null || item.getType() != Material.SPLASH_POTION || !(item.getItemMeta() instanceof PotionMeta meta)) return null;
         String potion = meta.getBasePotionType().name();
         if (potion.contains("STRENGTH")) return PotionEffectType.STRENGTH;
-        if (potion.contains("SPEED")) return PotionEffectType.SPEED;
+        if (potion.contains("SWIFTNESS") || potion.contains("SPEED")) return PotionEffectType.SPEED;
         return null;
     }
 
@@ -737,8 +752,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             PotionEffectType effect = effectFromPotion(cursor);
             if (effect == null) { player.sendMessage(ChatColor.RED + "Пока доступны только зелья Силы и Скорости."); return; }
             Predicate<ItemStack> matchingPotion = item -> effectFromPotion(item) == effect;
-            if (countArmyItems(player, cursor, matchingPotion) < army.size()) {
-                player.sendMessage(ChatColor.RED + "Нужно зелий с эффектом " + effect.getName() + ": " + army.size() + " шт. (считаются предметы в инвентаре и на курсоре)."); return;
+            if (countArmyItems(player, cursor, matchingPotion) < 1) {
+                player.sendMessage(ChatColor.RED + "Нужно одно взрывное зелье эффекта " + effect.getName() + "."); return;
             }
             for (Map.Entry<UUID, BeeProfile> entry : army) {
                 BeeProfile profile = entry.getValue();
@@ -747,8 +762,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
                 if (bee != null && bee.isValid()) applyStoredPotionEffect(bee, profile);
             }
             if (player.getGameMode() != org.bukkit.GameMode.CREATIVE)
-                consumeArmyItems(player, event, matchingPotion, army.size());
-            player.sendMessage(ChatColor.GREEN + "Эффект " + effect.getName() + " выдан всему отряду.");
+                consumeArmyItems(player, event, matchingPotion, 1);
+            player.sendMessage(ChatColor.GREEN + "Одно взрывное зелье " + effect.getName() + " применено ко всем " + army.size() + " пчёлам.");
         }
         saveProfiles(); openArmyEquipmentMenu(player);
     }
@@ -760,7 +775,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         Inventory inv = Bukkit.createInventory(holder, 54, "§6✦ BeeKingdom §8| §fНастройки пчелы"); holder.inventory = inv;
         ItemStack filler = namedItem(Material.GRAY_STAINED_GLASS_PANE, "§8 ", List.of());
         for (int i = 0; i < 54; i++) inv.setItem(i, filler);
-        inv.setItem(4, namedItem(Material.BEEHIVE, "§6Информация о пчеле", List.of("§7Статус: " + (loaded ? "§aЗагружена" : "§eЧанк выгружен"), "§7Текущий режим: §f" + p.mode.title)));
+        inv.setItem(4, namedItem(Material.BEEHIVE, "§6Информация о пчеле", List.of("§7Статус: " + (loaded ? "§aЗагружена" : "§eЧанк выгружен"), "§7Текущий режим: §f" + p.mode.title, p.fattened ? "§aОткормлена" : "§7Сахар: " + p.sugarFed + "/64")));
         inv.setItem(10, modeItem(Material.FEATHER, "§aСледовать за игроком", Mode.FOLLOW, p));
         inv.setItem(12, modeItem(Material.OAK_SAPLING, "§eСвободный полёт", Mode.STAY, p));
         inv.setItem(14, modeItem(Material.TARGET, "§cАтака выбранной цели", Mode.TARGET, p, "§7Нажми и введи ник игрока"));
@@ -805,6 +820,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             p.fattened = getConfig().getBoolean("bees." + key + ".fattened", false);
             p.saddled = getConfig().getBoolean("bees." + key + ".saddled", false);
             p.potionEffect = getConfig().getString("bees." + key + ".potion-effect", "");
+            p.sugarFed = Math.max(0, Math.min(64, getConfig().getInt("bees." + key + ".sugar-fed", 0)));
             p.world = getConfig().getString("bees." + key + ".world", ""); p.chunkX = getConfig().getInt("bees." + key + ".chunk-x");
             p.chunkZ = getConfig().getInt("bees." + key + ".chunk-z"); p.hasLocation = !p.world.isBlank() && getConfig().contains("bees." + key + ".chunk-x");
             profiles.put(id, p);
@@ -819,6 +835,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             getConfig().set(path + ".target", p.targetName); getConfig().set(path + ".armor", p.armor);
             getConfig().set(path + ".fattened", p.fattened); getConfig().set(path + ".saddled", p.saddled);
             getConfig().set(path + ".potion-effect", p.potionEffect);
+            getConfig().set(path + ".sugar-fed", p.sugarFed);
             if (p.hasLocation) { getConfig().set(path + ".world", p.world); getConfig().set(path + ".chunk-x", p.chunkX); getConfig().set(path + ".chunk-z", p.chunkZ); }
         }
         saveConfig();
