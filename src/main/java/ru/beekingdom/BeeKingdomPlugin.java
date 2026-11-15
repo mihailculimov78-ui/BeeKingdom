@@ -207,6 +207,17 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             return;
         }
         event.setCancelled(true);
+        if (event.getView().getTitle().contains("Управление отрядом")) {
+            if (raw == 22) { openMainMenu(player, 0); return; }
+            if (raw == 11 || raw == 15) { applyArmyItem(player, event, raw); return; }
+            return;
+        }
+        if (event.getView().getTitle().contains("Откормленные пчёлы")) {
+            if (raw == 45) { openMainMenu(player, 0); return; }
+            if (raw == 51 && holder.page > 0) openFattenedMenu(player, holder.page - 1);
+            if (raw == 53) openFattenedMenu(player, holder.page + 1);
+            return;
+        }
         if (!holder.detail) {
             if (raw < holder.entries.size()) { openBeeMenu(player, holder.entries.get(raw)); return; }
             if (raw == 44) { openArmyEquipmentMenu(player); return; }
