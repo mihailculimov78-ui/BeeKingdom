@@ -16,6 +16,9 @@ import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.attribute.Attribute;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
+import org.bukkit.inventory.meta.PotionMeta;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
@@ -206,6 +209,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         event.setCancelled(true);
         if (!holder.detail) {
             if (raw < holder.entries.size()) { openBeeMenu(player, holder.entries.get(raw)); return; }
+            if (raw == 44) { openArmyEquipmentMenu(player); return; }
+            if (raw == 50) { openFattenedMenu(player, 0); return; }
             if (raw >= 45 && raw <= 49) {
                 Mode[] modes = {Mode.FOLLOW, Mode.STAY, Mode.TARGET, Mode.PEACEFUL, Mode.BERSERK};
                 Mode mode = modes[raw - 45];
@@ -220,6 +225,17 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             return;
         }
 
+        if (event.getView().getTitle().contains("Управление отрядом")) {
+            if (raw == 22) { openMainMenu(player, 0); return; }
+            if (raw == 11 || raw == 15) { applyArmyItem(player, event, raw); return; }
+            return;
+        }
+        if (event.getView().getTitle().contains("Откормленные пчёлы")) {
+            if (raw == 45) { openMainMenu(player, 0); return; }
+            if (raw == 51 && holder.page > 0) openFattenedMenu(player, holder.page - 1);
+            if (raw == 53) openFattenedMenu(player, holder.page + 1);
+            return;
+        }
         UUID beeId = holder.beeId;
         BeeProfile profile = profiles.get(beeId);
         Bee bee = loadedBees.get(beeId);
@@ -518,7 +534,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     }
 
     private void openMainMenu(Player player, int requestedPage) {
-        List<UUID> owned = profiles.entrySet().stream().filter(e -> e.getValue().owner.equals(player.getUniqueId()))
+        List<UUID> owned = profiles.entrySet().stream().filter(e -> e.getValue().owner.equals(player.getUniqueId()) && !e.getValue().fattened)
                 .map(Map.Entry::getKey).sorted(Comparator.comparing(UUID::toString)).toList();
         int maxPage = Math.max(0, (owned.size() - 1) / 36); int page = Math.max(0, Math.min(requestedPage, maxPage));
         MenuHolder holder = new MenuHolder(false, page, null);
@@ -541,9 +557,87 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         inv.setItem(48, armyModeItem(player.getUniqueId(), Material.WHITE_WOOL, "§bМирный режим", Mode.PEACEFUL));
         inv.setItem(49, armyModeItem(player.getUniqueId(), Material.BLAZE_POWDER, "§6Защита территории", Mode.BERSERK));
         if (page > 0) inv.setItem(51, namedItem(Material.ARROW, "§f← Назад", List.of("§7Предыдущая страница")));
-        inv.setItem(52, namedItem(Material.MAP, "§eСтраница " + (page + 1) + "/" + (maxPage + 1), List.of("§7Всего пчёл: " + owned.size(), "§7Нажми на пчелу для настроек")));
+        inv.setItem(44, namedItem(Material.CHEST, "§bУправление отрядом", List.of("§7Общая броня и эффекты", "§eНажми, чтобы открыть")));
+        inv.setItem(50, namedItem(Material.HONEY_BLOCK, "§6Откормленные пчёлы", List.of("§7Отдельная категория", "§7Количество: " + profiles.values().stream().filter(p -> p.owner.equals(player.getUniqueId()) && p.fattened).count(), "§eНажми, чтобы открыть")));
+        inv.setItem(52, namedItem(Material.MAP, "§eСтраница " + (page + 1) + "/" + (maxPage + 1), List.of("§7Обычных пчёл: " + owned.size(), "§7Нажми на пчелу для настроек")));
         if (page < maxPage) inv.setItem(53, namedItem(Material.ARROW, "§fВперёд →", List.of("§7Следующая страница")));
         player.openInventory(inv);
+    }
+
+    private void openFattenedMenu(Player player, int requestedPage) {
+        List<UUID> owned = profiles.entrySet().stream().filter(e -> e.getValue().owner.equals(player.getUniqueId()) && e.getValue().fattened)
+                .map(Map.Entry::getKey).sorted(Comparator.comparing(UUID::toString)).toList();
+        int maxPage = Math.max(0, (owned.size() - 1) / 36); int page = Math.max(0, Math.min(requestedPage, maxPage));
+        MenuHolder holder = new MenuHolder(false, page, null);
+        Inventory inv = Bukkit.createInventory(holder, 54, "§6✦ BeeKingdom §8| §fОткормленные пчёлы"); holder.inventory = inv;
+        ItemStack filler = namedItem(Material.GRAY_STAINED_GLASS_PANE, "§8 ", List.of());
+        for (int i = 0; i < 54; i++) inv.setItem(i, filler);
+        for (int i = page * 36; i < Math.min((page + 1) * 36, owned.size()); i++) {
+            UUID id = owned.get(i); BeeProfile p = profiles.get(id); Bee bee = loadedBees.get(id);
+            boolean loaded = bee != null && bee.isValid() && !bee.isDead();
+            inv.setItem(i - page * 36, namedItem(Material.HONEY_BLOCK, "§6Большая пчела №" + (i + 1),
+                    List.of("§7Режим: §f" + p.mode.title, "§7Статус: " + (loaded ? "§aВ мире" : "§eЧанк не загружен"),
+                            "§7Броня: §f" + (p.armor.isBlank() ? "нет" : friendlyArmor(p.armor)), "§eНажми для настроек")));
+            holder.entries.add(id);
+        }
+        inv.setItem(45, namedItem(Material.ARROW, "§f← К обычным пчёлам", List.of()));
+        if (page > 0) inv.setItem(51, namedItem(Material.ARROW, "§f← Назад", List.of()));
+        inv.setItem(52, namedItem(Material.MAP, "§eСтраница " + (page + 1) + "/" + (maxPage + 1), List.of("§7Всего: " + owned.size())));
+        if (page < maxPage) inv.setItem(53, namedItem(Material.ARROW, "§fВперёд →", List.of()));
+        player.openInventory(inv);
+    }
+
+    private void openArmyEquipmentMenu(Player player) {
+        MenuHolder holder = new MenuHolder(false, 0, null);
+        Inventory inv = Bukkit.createInventory(holder, 27, "§6✦ BeeKingdom §8| §fУправление отрядом"); holder.inventory = inv;
+        ItemStack filler = namedItem(Material.GRAY_STAINED_GLASS_PANE, "§8 ", List.of());
+        for (int i = 0; i < 27; i++) inv.setItem(i, filler);
+        long count = profiles.values().stream().filter(p -> p.owner.equals(player.getUniqueId())).count();
+        inv.setItem(11, namedItem(Material.DIAMOND_HORSE_ARMOR, "§bБроня всему отряду", List.of("§7Нужно по одной конской броне", "§7на каждую пчелу: " + count, "§eВозьми нужное количество на курсор")));
+        inv.setItem(15, namedItem(Material.POTION, "§dЭффект всему отряду", List.of("§7Одно зелье на каждую пчелу: " + count, "§7Поддерживаются Сила и Скорость", "§eВозьми зелья на курсор")));
+        inv.setItem(22, namedItem(Material.ARROW, "§f← Назад", List.of()));
+        player.openInventory(inv);
+    }
+
+    private void applyArmyItem(Player player, InventoryClickEvent event, int slot) {
+        List<Map.Entry<UUID, BeeProfile>> army = profiles.entrySet().stream().filter(e -> e.getValue().owner.equals(player.getUniqueId())).toList();
+        if (army.isEmpty()) { player.sendMessage(ChatColor.RED + "У тебя пока нет приручённых пчёл."); return; }
+        ItemStack cursor = event.getCursor();
+        if (slot == 11) {
+            if (cursor == null || cursor.getAmount() < army.size() || !isHorseArmor(cursor.getType())) {
+                player.sendMessage(ChatColor.RED + "Нужно конской брони: " + army.size() + " шт."); return;
+            }
+            Material armor = cursor.getType();
+            for (Map.Entry<UUID, BeeProfile> entry : army) {
+                BeeProfile p = entry.getValue();
+                if (!p.armor.isBlank()) giveArmor(player, p.armor);
+                p.armor = armor.name();
+                Bee bee = loadedBees.get(entry.getKey());
+                if (bee != null && bee.isValid()) { applyArmorDisplay(bee, p); writeProfileToBee(bee, p); }
+            }
+            if (player.getGameMode() != org.bukkit.GameMode.CREATIVE) {
+                if (cursor.getAmount() == army.size()) event.setCursor(null);
+                else { cursor.setAmount(cursor.getAmount() - army.size()); event.setCursor(cursor); }
+            }
+            saveProfiles(); player.sendMessage(ChatColor.GREEN + "Броня выдана всем " + army.size() + " пчёлам.");
+        } else {
+            if (cursor == null || cursor.getType() != Material.POTION || !(cursor.getItemMeta() instanceof PotionMeta meta) || cursor.getAmount() < army.size()) {
+                player.sendMessage(ChatColor.RED + "Нужно обычных зелий: " + army.size() + " шт."); return;
+            }
+            String potion = meta.getBasePotionType().name();
+            PotionEffectType effect = potion.contains("STRENGTH") ? PotionEffectType.STRENGTH : potion.contains("SPEED") ? PotionEffectType.SPEED : null;
+            if (effect == null) { player.sendMessage(ChatColor.RED + "Пока доступны только зелья Силы и Скорости."); return; }
+            for (Map.Entry<UUID, BeeProfile> entry : army) {
+                Bee bee = loadedBees.get(entry.getKey());
+                if (bee != null && bee.isValid()) bee.addPotionEffect(new PotionEffect(effect, 20 * 60 * 8, 0, true, true, true));
+            }
+            if (player.getGameMode() != org.bukkit.GameMode.CREATIVE) {
+                if (cursor.getAmount() == army.size()) event.setCursor(null);
+                else { cursor.setAmount(cursor.getAmount() - army.size()); event.setCursor(cursor); }
+            }
+            player.sendMessage(ChatColor.GREEN + "Эффект " + effect.getName() + " выдан всему отряду.");
+        }
+        saveProfiles(); openArmyEquipmentMenu(player);
     }
 
     private void openBeeMenu(Player player, UUID beeId) {
