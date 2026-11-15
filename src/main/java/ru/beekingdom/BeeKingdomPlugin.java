@@ -74,6 +74,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         boolean hasLocation;
         boolean fattened;
         boolean saddled;
+        String potionEffect = "";
         BeeProfile(UUID owner) { this.owner = owner; }
     }
 
@@ -98,7 +99,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private final Map<UUID, Integer> freeFlightRefresh = new HashMap<>();
     private final Map<UUID, LivingEntity> ridingAttackTargets = new HashMap<>();
 
-    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey, saddledKey;
+    private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey, saddledKey, potionEffectKey;
 
     @Override public void onEnable() {
         ownerKey = new NamespacedKey(this, "owner");
@@ -109,6 +110,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         displayKey = new NamespacedKey(this, "armor_display");
         fattenedKey = new NamespacedKey(this, "fattened");
         saddledKey = new NamespacedKey(this, "saddled");
+        potionEffectKey = new NamespacedKey(this, "potion_effect");
         saveDefaultConfig();
         loadProfiles();
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -196,9 +198,16 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (event.getPlayer().getGameMode() != org.bukkit.GameMode.CREATIVE) hand.setAmount(hand.getAmount() - 64);
         profile.fattened = true;
         applyBeeScale(bee, profile);
+        applyStoredPotionEffect(bee, profile);
         writeProfileToBee(bee, profile);
         saveProfiles();
         event.getPlayer().sendMessage(ChatColor.GREEN + "Пчела откормлена! Она стала крупнее.");
+    }
+
+    private void applyStoredPotionEffect(Bee bee, BeeProfile profile) {
+        PotionEffectType type = "SPEED".equalsIgnoreCase(profile.potionEffect) ? PotionEffectType.SPEED
+                : "STRENGTH".equalsIgnoreCase(profile.potionEffect) ? PotionEffectType.STRENGTH : null;
+        if (type != null) bee.addPotionEffect(new PotionEffect(type, 20 * 60 * 8, 0, true, true, true));
     }
 
     private void applyBeeScale(Bee bee, BeeProfile profile) {
@@ -475,6 +484,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             profile.armor = valueOrEmpty(bee.getPersistentDataContainer().get(armorKey, PersistentDataType.STRING));
             profile.fattened = Boolean.parseBoolean(valueOrEmpty(bee.getPersistentDataContainer().get(fattenedKey, PersistentDataType.STRING)));
             profile.saddled = Boolean.parseBoolean(valueOrEmpty(bee.getPersistentDataContainer().get(saddledKey, PersistentDataType.STRING)));
+            profile.potionEffect = valueOrEmpty(bee.getPersistentDataContainer().get(potionEffectKey, PersistentDataType.STRING));
             profiles.put(id, profile);
         }
         rememberLocation(profile, bee); loadedBees.put(id, bee);
@@ -579,6 +589,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         pdc.set(armorKey, PersistentDataType.STRING, profile.armor);
         pdc.set(fattenedKey, PersistentDataType.STRING, Boolean.toString(profile.fattened));
         pdc.set(saddledKey, PersistentDataType.STRING, Boolean.toString(profile.saddled));
+        pdc.set(potionEffectKey, PersistentDataType.STRING, profile.potionEffect);
     }
 
     private void removeArmorDisplay(Bee bee) {
@@ -697,8 +708,10 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             PotionEffectType effect = potion.contains("STRENGTH") ? PotionEffectType.STRENGTH : potion.contains("SPEED") ? PotionEffectType.SPEED : null;
             if (effect == null) { player.sendMessage(ChatColor.RED + "Пока доступны только зелья Силы и Скорости."); return; }
             for (Map.Entry<UUID, BeeProfile> entry : army) {
+                BeeProfile profile = entry.getValue();
+                profile.potionEffect = effect.getName();
                 Bee bee = loadedBees.get(entry.getKey());
-                if (bee != null && bee.isValid()) bee.addPotionEffect(new PotionEffect(effect, 20 * 60 * 8, 0, true, true, true));
+                if (bee != null && bee.isValid()) applyStoredPotionEffect(bee, profile);
             }
             if (player.getGameMode() != org.bukkit.GameMode.CREATIVE) {
                 if (cursor.getAmount() == army.size()) event.setCursor(null);
@@ -760,6 +773,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             p.targetName = getConfig().getString("bees." + key + ".target", ""); p.armor = getConfig().getString("bees." + key + ".armor", "");
             p.fattened = getConfig().getBoolean("bees." + key + ".fattened", false);
             p.saddled = getConfig().getBoolean("bees." + key + ".saddled", false);
+            p.potionEffect = getConfig().getString("bees." + key + ".potion-effect", "");
             p.world = getConfig().getString("bees." + key + ".world", ""); p.chunkX = getConfig().getInt("bees." + key + ".chunk-x");
             p.chunkZ = getConfig().getInt("bees." + key + ".chunk-z"); p.hasLocation = !p.world.isBlank() && getConfig().contains("bees." + key + ".chunk-x");
             profiles.put(id, p);
@@ -773,6 +787,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             getConfig().set(path + ".owner", p.owner.toString()); getConfig().set(path + ".mode", p.mode.name());
             getConfig().set(path + ".target", p.targetName); getConfig().set(path + ".armor", p.armor);
             getConfig().set(path + ".fattened", p.fattened); getConfig().set(path + ".saddled", p.saddled);
+            getConfig().set(path + ".potion-effect", p.potionEffect);
             if (p.hasLocation) { getConfig().set(path + ".world", p.world); getConfig().set(path + ".chunk-x", p.chunkX); getConfig().set(path + ".chunk-z", p.chunkZ); }
         }
         saveConfig();
