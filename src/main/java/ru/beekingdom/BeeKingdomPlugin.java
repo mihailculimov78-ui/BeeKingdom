@@ -303,11 +303,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     @EventHandler public void onBeeDamage(EntityDamageByEntityEvent event) {
         if (event.getEntity() instanceof Bee victim && event.getDamager() instanceof Player attacker) {
             BeeProfile victimProfile = profiles.get(victim.getUniqueId());
-            // Приручённую пчелу могут атаковать все игроки, кроме владельца.
-            if (victimProfile != null && attacker.getUniqueId().equals(victimProfile.owner)) {
-                event.setCancelled(true);
-                return;
-            }
+            // Урон по приручённым пчёлам не отменяем: атаковать их могут все игроки.
             // В свободном полёте пчела отвечает на нападение обычным поведением Minecraft.
             if (victimProfile != null && victimProfile.mode == Mode.STAY) {
                 victim.setAware(true);
