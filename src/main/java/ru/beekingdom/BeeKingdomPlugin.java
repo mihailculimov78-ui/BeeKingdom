@@ -457,6 +457,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         }
         profiles.remove(beeId); loadedBees.remove(beeId);
         freeFlightDirections.remove(beeId); freeFlightRefresh.remove(beeId);
+        ridingAttackTargets.remove(beeId);
         pendingBeeTarget.values().removeIf(id -> id.equals(beeId));
         saveProfiles();
         player.sendMessage(ChatColor.GREEN + "Пчела отпущена. Она больше не связана с твоим ошейником.");
@@ -553,6 +554,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (profile.saddled) event.getDrops().add(new ItemStack(Material.SADDLE));
         removeArmorDisplay(bee); loadedBees.remove(bee.getUniqueId());
         freeFlightDirections.remove(bee.getUniqueId()); freeFlightRefresh.remove(bee.getUniqueId());
+        ridingAttackTargets.remove(bee.getUniqueId());
+        discoPreviousAI.remove(bee.getUniqueId()); discoPreviousGravity.remove(bee.getUniqueId());
         pendingBeeTarget.values().removeIf(id -> id.equals(bee.getUniqueId())); saveProfiles();
     }
 
@@ -925,7 +928,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             return;
         }
         Vector away = new Vector(0, 0, 0);
-        for (int dx = -3; dx <= 3; dx++) for (int dy = -2; dy <= 1; dy++) for (int dz = -3; dz <= 3; dz++) {
+        for (int dx = -2; dx <= 2; dx++) for (int dy = -1; dy <= 0; dy++) for (int dz = -2; dz <= 2; dz++) {
             if (dx == 0 && dy == 0 && dz == 0) continue;
             Location sample = here.clone().add(dx, dy, dz);
             if (!isWaterBlock(sample.getBlock())) continue;
@@ -945,8 +948,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
 
     private Location findDryBeeLocation(Bee bee) {
         Location base = bee.getLocation();
-        for (int radius = 1; radius <= 6; radius++) {
-            for (int dy = 1; dy <= 6; dy++) {
+        for (int radius = 1; radius <= 4; radius++) {
+            for (int dy = 1; dy <= 4; dy++) {
                 for (int dx = -radius; dx <= radius; dx++) for (int dz = -radius; dz <= radius; dz++) {
                     if (Math.max(Math.abs(dx), Math.abs(dz)) != radius) continue;
                     Location candidate = base.clone().add(dx, dy, dz);
@@ -1033,6 +1036,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         int count = cursor != null && matches.test(cursor) ? cursor.getAmount() : 0;
         for (ItemStack item : player.getInventory().getStorageContents())
             if (item != null && matches.test(item)) count += item.getAmount();
+        ItemStack offhand = player.getInventory().getItemInOffHand();
+        if (offhand != null && matches.test(offhand)) count += offhand.getAmount();
         return count;
     }
 
@@ -1053,10 +1058,20 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             if (item.getAmount() == used) player.getInventory().setItem(slot, null);
             else { item.setAmount(item.getAmount() - used); player.getInventory().setItem(slot, item); }
         }
+        if (remaining > 0) {
+            ItemStack offhand = player.getInventory().getItemInOffHand();
+            if (offhand != null && matches.test(offhand)) {
+                int used = Math.min(remaining, offhand.getAmount());
+                remaining -= used;
+                if (offhand.getAmount() == used) player.getInventory().setItemInOffHand(null);
+                else { offhand.setAmount(offhand.getAmount() - used); player.getInventory().setItemInOffHand(offhand); }
+            }
+        }
     }
 
     private PotionEffectType effectFromPotion(ItemStack item) {
         if (item == null || item.getType() != Material.SPLASH_POTION || !(item.getItemMeta() instanceof PotionMeta meta)) return null;
+        if (meta.getBasePotionType() == null) return null;
         String potion = meta.getBasePotionType().name();
         if (potion.contains("STRENGTH")) return PotionEffectType.STRENGTH;
         if (potion.contains("SWIFTNESS") || potion.contains("SPEED")) return PotionEffectType.SPEED;
