@@ -689,6 +689,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
          for (Map.Entry<UUID, BeeProfile> entry : profiles.entrySet()) {
             Bee bee = loadedBees.get(entry.getKey()); if (bee == null || !bee.isValid() || bee.isDead()) continue;
             BeeProfile profile = entry.getValue();
+            if (!profile.armor.isBlank()) updateArmorDisplay(bee);
             // Флаг ужаливания регулярно сбрасывается: таймер смерти после укуса не должен сработать.
             if (bee.hasStung()) bee.setHasStung(false);
             Player rider = bee.getPassengers().stream().filter(passenger -> passenger instanceof Player).map(passenger -> (Player) passenger).findFirst().orElse(null);
@@ -799,26 +800,44 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     }
 
     private void removeArmorDisplay(Bee bee) {
-        for (Entity passenger : new ArrayList<>(bee.getPassengers())) if (passenger instanceof ItemDisplay display
-                && display.getPersistentDataContainer().has(displayKey, PersistentDataType.STRING)) display.remove();
+        String beeId = bee.getUniqueId().toString();
+        for (Entity entity : bee.getWorld().getNearbyEntities(bee.getLocation(), 2.5, 2.5, 2.5)) {
+            if (entity instanceof ItemDisplay display
+                    && beeId.equals(display.getPersistentDataContainer().get(displayKey, PersistentDataType.STRING))) display.remove();
+        }
     }
 
     private void applyArmorDisplay(Bee bee, BeeProfile profile) {
         removeArmorDisplay(bee);
         if (profile.armor.isBlank()) return;
-        Material material = Material.matchMaterial(profile.armor); if (material == null) return;
-        ItemDisplay display = bee.getWorld().spawn(bee.getLocation(), ItemDisplay.class, entity -> {
+        Material material = Material.matchMaterial(profile.armor);
+        if (material == null) return;
+        Location armorLocation = bee.getLocation().clone().add(0.0, 0.28, 0.0);
+        ItemDisplay display = bee.getWorld().spawn(armorLocation, ItemDisplay.class, entity -> {
             ItemStack armorItem = new ItemStack(material);
             armorItem.editMeta(meta -> meta.setItemModel(new NamespacedKey(this, "bee_armor")));
             entity.setItemStack(armorItem);
             entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.NONE);
-            // Меньший размер и смещение вверх выводят модель снаряжения над спинкой,
-            // вместо того чтобы крупный предмет проходил сквозь тело пчелы.
-            entity.setTransformation(new Transformation(new Vector3f(0.0f, 0.16f, 0.0f), new Quaternionf(),
+            entity.setBillboard(org.bukkit.entity.Display.Billboard.FIXED);
+            entity.setTransformation(new Transformation(new Vector3f(0.0f, 0.0f, 0.0f), new Quaternionf(),
                     new Vector3f(0.72f, 0.72f, 0.72f), new Quaternionf()));
-            entity.setPersistent(true); entity.getPersistentDataContainer().set(displayKey, PersistentDataType.STRING, bee.getUniqueId().toString());
+            entity.setPersistent(true);
+            entity.getPersistentDataContainer().set(displayKey, PersistentDataType.STRING, bee.getUniqueId().toString());
         });
-        bee.addPassenger(display);
+        display.setRotation(bee.getLocation().getYaw(), 0.0f);
+    }
+
+    private void updateArmorDisplay(Bee bee) {
+        String beeId = bee.getUniqueId().toString();
+        for (Entity entity : bee.getWorld().getNearbyEntities(bee.getLocation(), 2.5, 2.5, 2.5)) {
+            if (!(entity instanceof ItemDisplay display)
+                    || !beeId.equals(display.getPersistentDataContainer().get(displayKey, PersistentDataType.STRING))) continue;
+            Location target = bee.getLocation().clone().add(0.0, 0.28, 0.0);
+            target.setPitch(0.0f);
+            display.teleport(target);
+            display.setRotation(bee.getLocation().getYaw(), 0.0f);
+            return;
+        }
     }
 
     private void openMainMenu(Player player, int requestedPage) {
