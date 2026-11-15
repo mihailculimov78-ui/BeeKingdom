@@ -484,7 +484,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.HEAD);
             // Меньший размер и смещение вверх выводят модель снаряжения над спинкой,
             // вместо того чтобы крупный предмет проходил сквозь тело пчелы.
-            entity.setTransformation(new Transformation(new Vector3f(0.0f, -0.18f, 0.0f), new Quaternionf(),
+            entity.setTransformation(new Transformation(new Vector3f(0.0f, 0.16f, 0.0f), new Quaternionf(),
                     new Vector3f(0.48f, 0.48f, 0.48f), new Quaternionf()));
             entity.setPersistent(true); entity.getPersistentDataContainer().set(displayKey, PersistentDataType.STRING, bee.getUniqueId().toString());
         });
