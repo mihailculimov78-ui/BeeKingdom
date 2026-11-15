@@ -32,6 +32,7 @@ import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerUnleashEntityEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.ChunkUnloadEvent;
@@ -135,7 +136,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         Bukkit.getPluginManager().registerEvents(this, this);
         if (getCommand("beekdom") != null) getCommand("beekdom").setExecutor(this);
         registerCollarRecipe();
-        for (World world : Bukkit.getWorlds()) for (Entity entity : world.getEntities()) if (entity instanceof Bee bee) registerLoadedBee(bee);
+        for (World world : Bukkit.getWorlds()) for (Bee bee : world.getEntitiesByClass(Bee.class)) registerLoadedBee(bee);
         cleanupAlreadyLoadedChunks();
         Bukkit.getScheduler().runTaskTimer(this, this::tickBees, 1L, 2L);
         getLogger().info("BeeKingdom включён. Профилей пчёл: " + profiles.size());
@@ -304,6 +305,15 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
                 event.getPlayer().sendMessage(ChatColor.GREEN + "Ты оседлал большую пчелу. Смотри в нужную сторону для управления.");
             }
         }
+    }
+
+    @EventHandler public void onPlayerQuit(PlayerQuitEvent event) {
+        UUID playerId = event.getPlayer().getUniqueId();
+        waitingForTarget.remove(playerId);
+        waitingForArmyTarget.remove(playerId);
+        waitingForAdminCode.remove(playerId);
+        pendingBeeTarget.remove(playerId);
+        ridingAttackTargets.values().removeIf(target -> target.getUniqueId().equals(playerId));
     }
 
     @EventHandler public void onCollarUse(PlayerInteractEvent event) {
@@ -985,8 +995,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     }
 
     private void tickDiscoParty() {
-        for (World world : Bukkit.getWorlds()) for (Entity entity : world.getEntities()) {
-            if (!(entity instanceof Bee bee) || adminBees.contains(bee.getUniqueId())) continue;
+        for (World world : Bukkit.getWorlds()) for (Bee bee : world.getEntitiesByClass(Bee.class)) {
+            if (adminBees.contains(bee.getUniqueId())) continue;
             UUID id = bee.getUniqueId();
             discoPreviousAI.putIfAbsent(id, bee.hasAI());
             discoPreviousGravity.putIfAbsent(id, bee.hasGravity());
