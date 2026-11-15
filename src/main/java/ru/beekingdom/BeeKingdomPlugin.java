@@ -265,7 +265,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         if (event.getView().getTitle().contains("Админ-панель")) {
             if (!adminPanelUsers.contains(player.getUniqueId())) { player.closeInventory(); player.sendMessage(ChatColor.RED + "Сначала введи код доступа."); return; }
             if (raw == 11) { spawnAdminBee(player); openAdminMenu(player); return; }
-            if (raw == 15) { discoParty = !discoParty; player.sendMessage(discoParty ? ChatColor.LIGHT_PURPLE + "Диско-пати включена!" : ChatColor.GRAY + "Диско-пати выключена."); openAdminMenu(player); return; }
+            if (raw == 15) { discoParty = !discoParty; if (!discoParty) restoreDiscoBees(); player.sendMessage(discoParty ? ChatColor.LIGHT_PURPLE + "Диско-пати включена!" : ChatColor.GRAY + "Диско-пати выключена."); openAdminMenu(player); return; }
             if (raw == 22) { openMainMenu(player, 0); return; }
             return;
         }
@@ -770,12 +770,19 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         }
     }
 
+    private void restoreDiscoBees() {
+        for (World world : Bukkit.getWorlds()) for (Entity entity : world.getEntities()) {
+            if (entity instanceof Bee bee && !adminBees.contains(bee.getUniqueId())) { bee.setAI(true); bee.setGravity(true); }
+        }
+    }
+
     private void tickDiscoParty() {
         for (World world : Bukkit.getWorlds()) for (Entity entity : world.getEntities()) {
             if (!(entity instanceof Bee bee) || adminBees.contains(bee.getUniqueId())) continue;
             bee.setAI(false);
             bee.setGravity(false);
             bee.setVelocity(new Vector(0, 0, 0));
+            bee.setRotation(bee.getLocation().getYaw() + 12.0f, bee.getLocation().getPitch());
             org.bukkit.Location base = bee.getLocation();
             double time = (System.currentTimeMillis() % 4000L) / 4000.0 * Math.PI * 2.0;
             for (int i = 0; i < 8; i++) {
