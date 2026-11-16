@@ -4,6 +4,7 @@ import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.Color;
 import org.bukkit.Material;
 import org.bukkit.Particle;
 import org.bukkit.NamespacedKey;
@@ -31,6 +32,7 @@ import org.bukkit.event.entity.PlayerLeashEntityEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.player.PlayerInputEvent;
 import org.bukkit.event.player.PlayerUnleashEntityEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
@@ -88,6 +90,21 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         BeeProfile(UUID owner) { this.owner = owner; }
     }
 
+    private static final class PollenCloud {
+        final Location center;
+        final UUID creator;
+        final long expiresAtTick;
+        long nextParticleTick;
+        long nextEffectTick;
+        PollenCloud(Location center, UUID creator, long expiresAtTick, long nowTick) {
+            this.center = center.clone();
+            this.creator = creator;
+            this.expiresAtTick = expiresAtTick;
+            this.nextParticleTick = nowTick;
+            this.nextEffectTick = nowTick;
+        }
+    }
+
     private static final class MenuHolder implements InventoryHolder {
         final boolean detail;
         final int page;
@@ -114,6 +131,15 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private final Map<UUID, Boolean> discoPreviousAI = new HashMap<>();
     private final Map<UUID, Boolean> discoPreviousGravity = new HashMap<>();
     private boolean discoParty = false;
+    private final List<PollenCloud> pollenClouds = new ArrayList<>();
+    private final Map<UUID, Long> pollenCooldowns = new HashMap<>();
+    private final Set<UUID> jumpHeld = new HashSet<>();
+    private long beeKingdomTick = 0L;
+    private static final long POLLEN_CLOUD_DURATION_TICKS = 20L * 9L;
+    private static final long POLLEN_COOLDOWN_TICKS = 20L * 12L;
+    private static final long POLLEN_EFFECT_REFRESH_TICKS = 20L * 4L;
+    private static final long POLLEN_EFFECT_DURATION_TICKS = 20L * 5L;
+    private static final double POLLEN_CLOUD_RADIUS = 4.5;
 
     private NamespacedKey ownerKey, modeKey, targetKey, armorKey, collarKey, displayKey, fattenedKey, saddledKey, potionEffectKey, sugarFedKey, adminBeeKey, adminOwnerKey, collarLeashKey;
 
@@ -317,11 +343,40 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
         }
     }
 
+    @EventHandler public void onPlayerInput(PlayerInputEvent event) {
+        Player player = event.getPlayer();
+        boolean jumping = event.getInput().isJump();
+        boolean wasJumping = jumpHeld.contains(player.getUniqueId());
+        if (jumping) jumpHeld.add(player.getUniqueId());
+        else jumpHeld.remove(player.getUniqueId());
+
+        if (!jumping || wasJumping || !(player.getVehicle() instanceof Bee bee)) return;
+
+        boolean canSpray = adminBees.contains(bee.getUniqueId()) && isAdminOwner(bee, player);
+        BeeProfile profile = profiles.get(bee.getUniqueId());
+        if (!canSpray && profile != null) {
+            canSpray = profile.fattened && profile.saddled && profile.owner.equals(player.getUniqueId());
+        }
+        if (!canSpray) return;
+
+        long readyAt = pollenCooldowns.getOrDefault(player.getUniqueId(), 0L);
+        if (beeKingdomTick < readyAt) {
+            player.sendActionBar(net.kyori.adventure.text.Component.text(
+                    "Распыление перезаряжается: " + Math.max(1, (readyAt - beeKingdomTick + 19) / 20) + " сек."));
+            return;
+        }
+        createPollenCloud(bee, player);
+        pollenCooldowns.put(player.getUniqueId(), beeKingdomTick + POLLEN_COOLDOWN_TICKS);
+        player.sendActionBar(net.kyori.adventure.text.Component.text("Пыльца распылена!"));
+    }
+
     @EventHandler public void onPlayerQuit(PlayerQuitEvent event) {
         UUID playerId = event.getPlayer().getUniqueId();
         waitingForTarget.remove(playerId);
         waitingForArmyTarget.remove(playerId);
         waitingForAdminCode.remove(playerId);
+        jumpHeld.remove(playerId);
+        pollenCooldowns.remove(playerId);
         pendingBeeTarget.remove(playerId);
         ridingAttackTargets.values().removeIf(target -> target.getUniqueId().equals(playerId));
     }
@@ -684,6 +739,8 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     }
 
     private void tickBees() {
+        beeKingdomTick += 2L;
+        tickPollenClouds();
         tickArmorDisplays();
         tickAdminBees();
         if (discoParty) tickDiscoParty();
@@ -755,6 +812,68 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             }
             keepBeeAwayFromWater(bee);
             rememberLocation(profile, bee);
+        }
+    }
+
+    private void createPollenCloud(Bee bee, Player creator) {
+        Location source = bee.getLocation().clone().add(0.0, 0.35, 0.0);
+        Location ground = source.clone();
+        boolean foundGround = false;
+        for (int down = 0; down <= 24; down++) {
+            Block block = source.clone().subtract(0, down, 0).getBlock();
+            if (!block.isPassable() && !block.isLiquid()) {
+                ground = block.getLocation().add(0.5, 1.15, 0.5);
+                foundGround = true;
+                break;
+            }
+        }
+        if (!foundGround) ground.subtract(0, 1.5, 0);
+
+        World world = bee.getWorld();
+        Particle.DustOptions pollen = new Particle.DustOptions(Color.fromRGB(255, 210, 55), 1.15f);
+        world.spawnParticle(Particle.DUST, source, 36, 0.35, 0.25, 0.35, 0.035, pollen);
+        world.spawnParticle(Particle.WAX_ON, source, 20, 0.4, 0.25, 0.4, 0.06);
+        world.playSound(source, org.bukkit.Sound.BLOCK_BEEHIVE_EXIT, 0.9f, 0.75f);
+
+        PollenCloud cloud = new PollenCloud(ground, creator.getUniqueId(),
+                beeKingdomTick + POLLEN_CLOUD_DURATION_TICKS, beeKingdomTick);
+        pollenClouds.add(cloud);
+        creator.sendMessage(ChatColor.YELLOW + "Пыльца образовала облако на 9 секунд. Перезарядка — 12 секунд.");
+    }
+
+    private void tickPollenClouds() {
+        if (pollenClouds.isEmpty()) return;
+        for (var iterator = pollenClouds.iterator(); iterator.hasNext();) {
+            PollenCloud cloud = iterator.next();
+            if (beeKingdomTick >= cloud.expiresAtTick || cloud.center.getWorld() == null) {
+                iterator.remove();
+                continue;
+            }
+            World world = cloud.center.getWorld();
+            if (beeKingdomTick >= cloud.nextParticleTick) {
+                cloud.nextParticleTick = beeKingdomTick + 4L;
+                world.spawnParticle(Particle.CLOUD, cloud.center, 28, 2.0, 1.0, 2.0, 0.015);
+                world.spawnParticle(Particle.ASH, cloud.center, 14, 2.0, 0.85, 2.0, 0.005);
+                world.spawnParticle(Particle.DUST, cloud.center, 8, 1.9, 0.7, 1.9, 0.01,
+                        new Particle.DustOptions(Color.fromRGB(255, 214, 75), 0.9f));
+            }
+            if (beeKingdomTick >= cloud.nextEffectTick) {
+                cloud.nextEffectTick = beeKingdomTick + POLLEN_EFFECT_REFRESH_TICKS;
+                double radiusSquared = POLLEN_CLOUD_RADIUS * POLLEN_CLOUD_RADIUS;
+                for (Player target : world.getPlayers()) {
+                    if (target.getUniqueId().equals(cloud.creator)) continue;
+                    Location at = target.getLocation();
+                    double dx = at.getX() - cloud.center.getX();
+                    double dz = at.getZ() - cloud.center.getZ();
+                    double dy = at.getY() - cloud.center.getY();
+                    if (dx * dx + dz * dz <= radiusSquared && dy >= -1.0 && dy <= 3.0) {
+                        target.addPotionEffect(new PotionEffect(PotionEffectType.DARKNESS,
+                                (int) POLLEN_EFFECT_DURATION_TICKS, 0, true, false, true));
+                        target.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS,
+                                (int) POLLEN_EFFECT_DURATION_TICKS, 0, true, false, true));
+                    }
+                }
+            }
         }
     }
 
