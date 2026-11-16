@@ -124,7 +124,7 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
     private static final long POLLEN_COOLDOWN_TICKS = 20L * 12L;
     private static final long POLLEN_EFFECT_REFRESH_TICKS = 20L * 4L;
     private static final long POLLEN_EFFECT_DURATION_TICKS = 20L * 5L;
-    private static final double POLLEN_CLOUD_RADIUS = 10.0;
+    private static final double POLLEN_CLOUD_RADIUS = 4.5;
     private static final long POLLEN_SPRAY_DURATION_TICKS = 20L * 3L;
 
     private static final class PollenCloud {
@@ -1042,13 +1042,14 @@ public final class BeeKingdomPlugin extends JavaPlugin implements Listener, Comm
             if (beeKingdomTick >= cloud.nextParticleTick) {
                 cloud.nextParticleTick = beeKingdomTick + (activelySpraying ? 2L : 4L);
                 // Плотный широкий слой пыльцы стелется по земле во время удержания пробела.
-                world.spawnParticle(Particle.CLOUD, cloud.center, activelySpraying ? 110 : 55,
-                        activelySpraying ? 5.0 : 4.5, 0.42, activelySpraying ? 5.0 : 4.5, 0.012);
-                world.spawnParticle(Particle.ASH, cloud.center, activelySpraying ? 65 : 30,
-                        activelySpraying ? 4.8 : 4.2, 0.35, activelySpraying ? 4.8 : 4.2, 0.004);
-                world.spawnParticle(Particle.DUST, cloud.center, activelySpraying ? 45 : 20,
-                        activelySpraying ? 4.7 : 4.0, 0.30, activelySpraying ? 4.7 : 4.0, 0.008,
-                        new Particle.DustOptions(Color.fromRGB(255, 214, 75), activelySpraying ? 1.15f : 0.9f));
+                world.spawnParticle(Particle.CLOUD, cloud.center, activelySpraying ? 100 : 55,
+                        2.0, 0.38, 2.0, 0.008);
+                world.spawnParticle(Particle.ASH, cloud.center, activelySpraying ? 55 : 30,
+                        2.0, 0.32, 2.0, 0.003);
+                // Крупные пылинки создают визуально массивное облако без увеличения его радиуса.
+                world.spawnParticle(Particle.DUST, cloud.center, activelySpraying ? 100 : 60,
+                        1.8, 0.28, 1.8, 0.004,
+                        new Particle.DustOptions(Color.fromRGB(255, 214, 75), activelySpraying ? 3.5f : 3.0f));
             }
             if (beeKingdomTick >= cloud.nextEffectTick) {
                 cloud.nextEffectTick = beeKingdomTick + POLLEN_EFFECT_REFRESH_TICKS;
