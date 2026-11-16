@@ -1,7 +1,7 @@
 package ru.beekingdom;
 
 import io.papermc.paper.event.player.AsyncChatEvent;
-import io.papermc.paper.event.player.PlayerInputEvent;
+import org.bukkit.event.player.PlayerInputEvent;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
